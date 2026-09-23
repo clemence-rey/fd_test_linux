@@ -36,6 +36,7 @@
 #=================================================================
 #endregion
 
+# region Imports
 from tests.usb_tests import (
     run_enumeration_test, 
     print_results, 
@@ -52,7 +53,7 @@ from tests.udev import (
     unmount_partition,
 )
 from pathlib import Path
-
+#endregion
 
 def main():
 
