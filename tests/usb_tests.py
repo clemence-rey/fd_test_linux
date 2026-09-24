@@ -76,8 +76,6 @@ def run_enumeration_test(
 
         print(f"\n=== ENUMERATION TEST : Cycle {i + 1}/{cycles} ===")
 
-        # (3) Un cycle en echec (unbind/bind impossible) ne doit pas
-        # interrompre les cycles suivants.
         try:
             start = reenumerate_usb(usb_devpath)
         except USBReenumerationError as exc:
@@ -160,13 +158,11 @@ def run_speed_test(
         usb_file = usb_path / f"test_{cycle}.bin"
         local_file = Path(f"/tmp/test_{cycle}.bin")
 
-        print("Generating random file...")
         create_random_file(local_file, file_size_mb)
 
         original_sha256 = compute_sha256(local_file)
 
         # WRITE TEST
-        print("Writing to USB...")
         t0 = time.perf_counter()
 
         with open(local_file, "rb") as src, open(usb_file, "wb") as dst:
@@ -179,7 +175,6 @@ def run_speed_test(
         drop_cache()
 
         # READ TEST
-        print("Reading from USB...")
         sha256_read = hashlib.sha256()
         t0 = time.perf_counter()
 
@@ -196,12 +191,6 @@ def run_speed_test(
 
         write_speed = actual_size_mb / write_time
         read_speed = actual_size_mb / read_time
-
-        print(f"Write time  : {write_time:.3f}s")
-        print(f"Read time   : {read_time:.3f}s")
-        print(f"File size   : {actual_size_mb:.3f}MB")
-        print(f"Write speed : {write_speed:.3f}MB/s")
-        print(f"Read speed  : {read_speed:.3f}MB/s")
 
         write_speeds.append(write_speed)
         read_speeds.append(read_speed)
@@ -239,8 +228,6 @@ def run_fio_seq_test(
 
         print(f"\n=== FIO SEQUENTIAL TEST ({file_size_mb} MB): Cycle {cycle + 1}/{cycles} ===")
 
-        # (7) Timeout ajoute : une cle qui se deconnecte pendant le
-        # test ne fige plus fio (et donc tout le banc) indefiniment.
         try:
             result = subprocess.run(
                 [
@@ -297,9 +284,6 @@ def run_fio_seq_test(
 
         write_speeds.append(write_bw)
         read_speeds.append(read_bw)
-
-        print(f"Write : {write_bw:.1f} MB/s")
-        print(f"Read  : {read_bw:.1f} MB/s")
 
     time_elapsed_ms = (time.time() - test_start) * 1000
 
@@ -398,9 +382,6 @@ def run_fio_rand_test(
         read_iops.append(job_read["iops"])
         read_bw.append(job_read["bw"] / 1024) # KB/s -> MB/s
 
-        print(f"Write : {job_write['iops']:.0f} IOPS ({write_bw[-1]:.1f} MB/s)")
-        print(f"Read : {job_read['iops']:.0f} IOPS ({read_bw[-1]:.1f} MB/s)")
-
     time_elapsed_ms = (time.time() - test_start) * 1000
 
     return {
@@ -424,13 +405,21 @@ def run_fio_rand_test(
 
 def print_results(
     info,
-    file_size_mb,
-    speed_results,
-    fio_seq_results,
-    fio_rand_results,
-    enumeration_results,
+    results,
     enumeration_cycles,
+    file_size_mb,
 ):
+    def format_duration(ms):
+        seconds = ms / 1000
+
+        if seconds < 60:
+            return f"{seconds:.1f} s"
+
+        minutes = int(seconds // 60)
+        remaining = seconds % 60
+
+        return f"{minutes} min {remaining:.1f} s"
+
     print("\n" + "=" * 60)
     print("USB FLASH DRIVE TEST REPORT")
     print("=" * 60)
@@ -441,103 +430,137 @@ def print_results(
     for key, value in info.items():
         print(f"{key:<18}: {value}")
 
-    print(f"\nSPEED TEST (CUSTOM) ({file_size_mb} MB)")
-    print("-" * 60)
+    if "speed" in results:
 
-    write_speeds = speed_results["write_speeds"]
-    read_speeds = speed_results["read_speeds"]
+        speed_results = results["speed"]
 
-    print(
-        f"Write MB/s      : "
-        f"avg={sum(write_speeds)/len(write_speeds):.1f}  "
-        f"min={min(write_speeds):.1f}  "
-        f"max={max(write_speeds):.1f}"
-    )
+        print(f"\nSPEED TEST (CUSTOM) ({file_size_mb} MB)")
+        print("-" * 60)
 
-    print(
-        f"Read MB/s       : "
-        f"avg={sum(read_speeds)/len(read_speeds):.1f}  "
-        f"min={min(read_speeds):.1f}  "
-        f"max={max(read_speeds):.1f}"
-    )
+        write_speeds = speed_results["write_speeds"]
+        read_speeds = speed_results["read_speeds"]
 
-    print(
-        f"Integrity       : "
-        f"{speed_results['integrity_ok']}/"
-        f"{speed_results['cycles']}"
-    )
-
-    print(f"Time elapsed    : {speed_results['time_elapsed_ms']:.0f}")
-
-    print(f"\nFIO SEQUENTIAL TEST ({file_size_mb} MB)")
-    print("-" * 60)
-
-    print(
-        f"Write MB/s      : "
-        f"avg={fio_seq_results['write_avg']:.1f}  "
-        f"min={fio_seq_results['write_min']:.1f}  "
-        f"max={fio_seq_results['write_max']:.1f}"
-    )
-
-    print(
-        f"Read MB/s       : "
-        f"avg={fio_seq_results['read_avg']:.1f}  "
-        f"min={fio_seq_results['read_min']:.1f}  "
-        f"max={fio_seq_results['read_max']:.1f}"
-    )
-
-    print(f"Time elapsed    : {fio_seq_results['time_elapsed_ms']:.0f}")
-
-    print(f"\nFIO RANDOM {fio_rand_results['block_size_kb']}K TEST "
-          f"(iodepth = {fio_rand_results['iodepth']}, "
-          f"{fio_rand_results['file_size_mb']} MB")
-    print("-" * 60)
-
-    print(
-        f"Write IOPS      : "
-        f"avg={fio_rand_results['write_iops_avg']:.0f}  "
-        f"min={fio_rand_results['write_iops_min']:.0f}  "
-        f"max={fio_rand_results['write_iops_max']:.0f}"
-    )
-
-    print(
-        f"Read IOPS       : "
-        f"avg={fio_rand_results['read_iops_avg']:.0f}  "
-        f"min={fio_rand_results['read_iops_min']:.0f}  "
-        f"max={fio_rand_results['read_iops_max']:.0f}"
-    )
-
-    print(f"Time elapsed    : {fio_rand_results['time_elapsed_ms']:.0f}")
-
-
-    print("\nENUMERATION TEST")
-    print("-" * 60)
-
-    speed_counts = enumeration_results["speeds"]
-    enum_times = enumeration_results["times_ms"]
-
-    for speed, count in sorted(speed_counts.items()):
-        print(f"{speed:<18}: {count}")
-
-    if enum_times:
-        avg_time = sum(enum_times) / len(enum_times)
-        min_time = min(enum_times)
-        max_time = max(enum_times)
         print(
-            f"Enumeration Time : "
-            f"avg={avg_time:.0f} ms  "
-            f"min={min_time:.0f} ms  "
-            f"max={max_time:.0f} ms"
+            f"Write MB/s      : "
+            f"avg={sum(write_speeds)/len(write_speeds):.1f}  "
+            f"min={min(write_speeds):.1f}  "
+            f"max={max(write_speeds):.1f}"
         )
 
-    success = sum(
-        count
-        for speed, count in speed_counts.items()
-        if speed not in ("Enumeration Failed", "Wrong Device", "Reenumeration Error")
-    )
-    success_rate = 100 * success / enumeration_cycles
+        print(
+            f"Read MB/s       : "
+            f"avg={sum(read_speeds)/len(read_speeds):.1f}  "
+            f"min={min(read_speeds):.1f}  "
+            f"max={max(read_speeds):.1f}"
+        )
 
-    print(f"\nSuccess Rate     : {success_rate:.1f}%")
-    print(f"Time elapsed    : {enumeration_results['time_elapsed_ms']:.0f}")
+        print(
+            f"Integrity       : "
+            f"{speed_results['integrity_ok']}/"
+            f"{speed_results['cycles']}"
+        )
+
+        print(
+            f"Time elapsed    : "
+            f"{format_duration(speed_results['time_elapsed_ms'])}"
+        )
+
+    if "fio_seq" in results:
+
+        fio_seq_results = results["fio_seq"]
+
+        print(f"\nFIO SEQUENTIAL TEST ({file_size_mb} MB)")
+        print("-" * 60)
+
+        print(
+            f"Write MB/s      : "
+            f"avg={fio_seq_results['write_avg']:.1f}  "
+            f"min={fio_seq_results['write_min']:.1f}  "
+            f"max={fio_seq_results['write_max']:.1f}"
+        )
+
+        print(
+            f"Read MB/s       : "
+            f"avg={fio_seq_results['read_avg']:.1f}  "
+            f"min={fio_seq_results['read_min']:.1f}  "
+            f"max={fio_seq_results['read_max']:.1f}"
+        )
+
+        print(
+            f"Time elapsed    : "
+            f"{format_duration(fio_seq_results['time_elapsed_ms'])}"
+        )
+
+    if "fio_rand" in results:
+
+        fio_rand_results = results["fio_rand"]
+
+        print(
+            f"\nFIO RANDOM {fio_rand_results['block_size_kb']}K TEST "
+            f"(iodepth={fio_rand_results['iodepth']}, "
+            f"{fio_rand_results['file_size_mb']} MB)"
+        )
+
+        print("-" * 60)
+
+        print(
+            f"Write IOPS      : "
+            f"avg={fio_rand_results['write_iops_avg']:.0f}  "
+            f"min={fio_rand_results['write_iops_min']:.0f}  "
+            f"max={fio_rand_results['write_iops_max']:.0f}"
+        )
+
+        print(
+            f"Read IOPS       : "
+            f"avg={fio_rand_results['read_iops_avg']:.0f}  "
+            f"min={fio_rand_results['read_iops_min']:.0f}  "
+            f"max={fio_rand_results['read_iops_max']:.0f}"
+        )
+
+        print(
+            f"Time elapsed    : "
+            f"{format_duration(fio_rand_results['time_elapsed_ms'])}"
+        )
+
+    if "enumeration" in results:
+
+        enumeration_results = results["enumeration"]
+
+        print("\nENUMERATION TEST")
+        print("-" * 60)
+
+        speed_counts = enumeration_results["speeds"]
+        enum_times = enumeration_results["times_ms"]
+
+        total_cycles = sum(speed_counts.values())
+
+        if total_cycles == 0:
+            print("No enumeration result available.")
+
+        else:
+            print("Results:")
+
+            for speed, count in sorted(speed_counts.items()):
+                percent = (count / total_cycles) * 100
+                print(
+                    f"  {speed:<22} : "
+                    f"{count:>3} cycles ({percent:.1f}%)"
+                )
+
+        if enum_times:
+
+            avg_time = sum(enum_times) / len(enum_times)
+
+            print("\nEnumeration Time:")
+
+            print(f"  Average : {avg_time:.0f} ms")
+            print(f"  Minimum : {min(enum_times):.0f} ms")
+            print(f"  Maximum : {max(enum_times):.0f} ms")
+
+
+        print(
+            f"  Total duration    : "
+            f"{format_duration(enumeration_results['time_elapsed_ms'])}"
+        )
 
     print("\n" + "=" * 60)

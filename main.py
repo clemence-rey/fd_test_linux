@@ -57,13 +57,28 @@ from pathlib import Path
 
 def main():
 
-    enumeration_cycles = 1
-    speed_cycles = 1
-    seq_test_file_size_mb = 400
+    ########## Configuration des tests ##########
 
+    # Custom and FIO sequential speed test params
+    speed_cycles = 3
+    seq_test_file_size_mb = 512
+
+    # FIO random test params
     random_test_file_size_mb = 100
     random_test_block_size_kb = 4
     random_test_iodepth = 32
+
+    # Enumeration params
+    enumeration_cycles = 3
+
+    ENABLED_TESTS = {
+        "speed":        True,
+        "fio_seq":      True,
+        "fio_rand":     True,
+        "enumeration":  True,
+    }
+
+    ########### Detection de la cle USB et montage de la partition ##########
 
 
     monitor = create_monitor()
@@ -93,50 +108,57 @@ def main():
 
     print("Mount point :", usb_mount)
 
+    ############ Execution des tests ##########
+
     try:
         info = get_usb_info(device, usb)
 
-        results_speed_test = run_speed_test(
-            usb_path=Path(usb_mount),
-            file_size_mb=seq_test_file_size_mb,
-            cycles=speed_cycles,
-        )
+        results = {}
 
-        results_fio_seq_test = run_fio_seq_test(
-            usb_path=Path(usb_mount),
-            file_size_mb=seq_test_file_size_mb,
-            cycles=speed_cycles,
-        )
+        if ENABLED_TESTS["speed"]:
+            results["speed"] = run_speed_test(
+                usb_path=Path(usb_mount),
+                file_size_mb=seq_test_file_size_mb,
+                cycles=speed_cycles,
+            )
 
-        results_fio_rand_test = run_fio_rand_test(
-            usb_path=Path(usb_mount),
-            file_size_mb=random_test_file_size_mb,
-            cycles=speed_cycles,
-            block_size_kb=random_test_block_size_kb,
-            iodepth=random_test_iodepth
-        )        
+        if ENABLED_TESTS["fio_seq"]:
+            results["fio_seq"] = run_fio_seq_test(
+                usb_path=Path(usb_mount),
+                file_size_mb=seq_test_file_size_mb,
+                cycles=speed_cycles,
+            )
 
-        usb_devpath = usb.sys_name
+        if ENABLED_TESTS["fio_rand"]:
+            results["fio_rand"] = run_fio_rand_test(
+                usb_path=Path(usb_mount),
+                file_size_mb=random_test_file_size_mb,
+                cycles=speed_cycles,
+                block_size_kb=random_test_block_size_kb,
+                iodepth=random_test_iodepth,
+            )
 
-        results_enumeration_test = run_enumeration_test(
-            monitor=monitor,
-            usb_devpath=usb_devpath,
-            expected_serial=usb.get("ID_SERIAL_SHORT"),
-            cycles=enumeration_cycles,
-        )
+        if ENABLED_TESTS["enumeration"]:
+            results["enumeration"] = run_enumeration_test(
+                monitor,
+                usb.sys_name,
+                usb.get("ID_SERIAL_SHORT"),
+                enumeration_cycles,
+            )
+        
 
         print_results(
             info,
-            seq_test_file_size_mb,
-            results_speed_test,
-            results_fio_seq_test,
-            results_fio_rand_test,
-            results_enumeration_test,
+            results,
             enumeration_cycles,
+            seq_test_file_size_mb
         )
+        
     finally:
         if mounted_by_us:
             unmount_partition(usb_mount)
+
+
 
 
 if __name__ == "__main__":
