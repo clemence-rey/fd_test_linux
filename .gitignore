@@ -27,6 +27,7 @@ Thumbs.db
 
 # Test outputs
 results/
+USB_results/
 
 # Tools and binaries
 tools/

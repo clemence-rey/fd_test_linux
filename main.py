@@ -60,8 +60,8 @@ def main():
     ########## Configuration des tests ##########
 
     # Custom and FIO sequential speed test params
-    speed_cycles = 3
-    seq_test_file_size_mb = 512
+    speed_cycles = 9
+    seq_test_file_size_mb = 16
 
     # FIO random test params
     random_test_file_size_mb = 100
@@ -74,8 +74,8 @@ def main():
     ENABLED_TESTS = {
         "speed":        True,
         "fio_seq":      True,
-        "fio_rand":     True,
-        "enumeration":  True,
+        "fio_rand":     False,
+        "enumeration":  False,
     }
 
     ########### Detection de la cle USB et montage de la partition ##########
