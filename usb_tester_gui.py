@@ -1,101 +1,44 @@
 #!/usr/bin/env python3
+
 # ============================================================
-# USB CHARACTERIZATION TOOL - LINUX - GUI PyQt5
+# USB FLASH DRIVE TESTER - LINUX / PyQt5
+# ============================================================
 #
-# Outil de caractérisation et de tri de clés USB : mesure des
-# débits d'écriture / lecture, vérification d'intégrité des données,
-# relevé SMART, puis verdict PASS / FAIL.
+# Test automatique de clés USB destiné à la caractérisation
+# et au contrôle PASS / FAIL.
 #
-# ------------------------------------------------------------
-# CYCLE D'UTILISATION (boucle)
-# ------------------------------------------------------------
-#   Insérez la clé -> Clé détectée (device + fabricant affichés)
-#   -> appui sur START -> Test en cours -> PASS / FAIL
-#   -> Retirer la clé -> Insérez la clé suivante ...
+# Le test :
+#   1. détecte et identifie la clé USB ;
+#   2. démonte ses partitions ;
+#   3. écrit puis relit des données directement sur le périphérique ;
+#   4. vérifie l'intégrité des données par SHA-256 ;
+#   5. mesure les débits d'écriture et de lecture ;
+#   6. reformate et vérifie la clé ;
+#   7. génère un CSV, un graphe PNG et un rapport PDF.
 #
-#   Le test ne démarre JAMAIS automatiquement : l'opérateur vérifie
-#   le device affiché (ex. /dev/sdb - Fabricant Modèle - xx GB) puis
-#   appuie sur START. Si plusieurs clés USB sont branchées, START est
-#   désactivé jusqu'à ce qu'il n'en reste qu'une.
+# Le test peut être limité par un nombre de cycles ou une durée.
+# Les E/S utilisent O_DIRECT lorsque disponible afin de limiter
+# l'influence du cache système.
 #
-# ------------------------------------------------------------
-# DÉROULEMENT D'UN TEST
-# ------------------------------------------------------------
-#   1. Infos périphérique : modèle, fabricant, série, taille (lsblk),
-#      VID/PID et vitesse USB négociée (udev / sysfs).
-#   2. SMART "avant" : relevé via smartctl (si la clé le permet).
-#   3. Démontage de toutes les partitions de la clé.
-#   4. Génération d'un bloc de données aléatoires (os.urandom) et
-#      calcul de son empreinte SHA-256 de référence.
-#   5. Cycles écriture + lecture, répétés jusqu'à la condition d'arrêt
-#      choisie (TEST_LIMIT_MODE) : nombre de cycles ("cycles") ou
-#      durée fixe ("duration").
-#        - ÉCRITURE : le bloc de référence est écrit en séquence,
-#          depuis le début du périphérique, TEST_FILE_SIZE_MB par cycle.
-#        - LECTURE  : la même zone est relue bloc par bloc ; chaque bloc
-#          lu est haché en SHA-256 et comparé à la référence. Un bloc
-#          différent (ou de taille incorrecte) compte comme erreur
-#          d'intégrité.
-#      Le temps de chaque bloc est mesuré uniquement autour de l'appel
-#      système d'E/S (writev / readv) : hachage, CSV et interface
-#      graphique sont exclus du chronométrage.
-#   6. SMART "après" et comparaison avec le relevé "avant".
-#   7. Reformatage : la clé repart directement utilisable.
-#   8. Verdict, puis génération des fichiers dans USB_results/ :
-#      CSV (une ligne par bloc), graphe PNG des débits, rapport PDF
-#      (texte + graphe).
+# PASS si :
+#   - aucune erreur d'intégrité ou d'E/S ;
+#   - le test est complet ;
+#   - les débits respectent les seuils configurés ;
+#   - le reformatage final réussit ;
+#   - O_DIRECT a été utilisé pendant le test.
 #
-# ------------------------------------------------------------
-# MÉCANISMES DE MESURE
-# ------------------------------------------------------------
-#   - Test BRUT sur le périphérique bloc entier (/dev/sdX), sans
-#     système de fichiers : on mesure la clé, pas le système de
-#     fichiers ni le cache du système.
-#   - E/S sans cache : O_DIRECT (contourne le cache de pages) et
-#     O_SYNC en écriture, avec fsync en fin de phase. Si O_DIRECT n'est
-#     pas supporté par l'adaptateur, le test continue sans lui et le
-#     rapport signale que les résultats sont à relativiser.
-#   - Débit moyen global : octets totaux / somme des temps d'E/S (MB/s,
-#     1 MB = 1e6 octets).
-#   - Régularité : écart-type (ddof=1) et coefficient de variation (CV)
-#     calculés sur les vitesses moyennes de chaque cycle ; non
-#     calculables avec moins de 2 cycles.
-#   - Déconnexion : toute erreur d'E/S fatale (écriture ou lecture) est
-#     comptée comme une déconnexion et arrête le test.
+# ATTENTION : TEST DESTRUCTIF
+# Les données présentes sur la clé sont écrasées.
+# Le disque système portant "/" est exclu de la détection.
 #
-# ------------------------------------------------------------
-# CRITÈRES PASS / FAIL
-# ------------------------------------------------------------
-#   PASS uniquement si TOUTES les conditions sont réunies :
-#     - aucune erreur d'intégrité et aucune déconnexion ;
-#     - test complet (écriture et lecture effectuées, non interrompu) ;
-#     - débit moyen d'écriture > MIN_WRITE_MBPS ;
-#     - MIN_READ_MBPS < débit moyen de lecture < MAX_READ_MBPS
-#       (une lecture trop rapide est jugée suspecte : cache ou mesure
-#       non fiable).
-#   Dans les autres cas : FAIL, avec la ou les raisons dans le rapport.
+# Exécution en root requise.
 #
-# ------------------------------------------------------------
-# ATTENTION : DESTRUCTIF
-# ------------------------------------------------------------
-#   Toute donnée présente sur la clé est perdue dès l'appui sur START
-#   (la zone testée est écrasée, puis la clé est reformatée).
-#   Ne jamais utiliser sur une clé contenant des données à conserver.
-#   Le disque portant la racine "/" est exclu de la détection.
+# Dépendances Python :
+#   PyQt5, matplotlib, numpy, pyudev
 #
-# ------------------------------------------------------------
-# PRÉREQUIS
-# ------------------------------------------------------------
-#   Doit tourner en ROOT (relance auto via pkexec/sudo si besoin) :
-#     - accès direct aux périphériques bloc (/dev/sdX)
-#     - démontage / reformatage
-#     - smartctl (ATA/SAT pass-through)
+# Dépendances système :
+#   util-linux, exfatprogs, dosfstools, ntfs-3g
 #
-#   Dépendances Python : PyQt5, matplotlib, numpy, pyudev
-#     pip install PyQt5 matplotlib numpy pyudev
-#
-#   Dépendances système : smartmontools, util-linux, exfatprogs, dosfstools, ntfs-3g
-#     sudo apt install smartmontools util-linux exfatprogs dosfstools ntfs-3g
 # ============================================================
 
 import sys
@@ -120,8 +63,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QProgressBar, QPlainTextEdit, QSplitter, QPushButton
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, 
+    QProgressBar, QPlainTextEdit, QSplitter, QPushButton
 )
 
 import pyudev
@@ -178,6 +121,7 @@ TXT_READY = "Clé détectée"
 TXT_PRESS_START = "Vérifiez le périphérique puis appuyez sur START"
 TXT_TOO_MANY = "Plusieurs clés branchées : ne laisser que la clé à tester"
 TXT_START = "START"
+TXT_INTERRUPT = "TEST INTERROMPU"
 
 
 # ============================================================
@@ -239,29 +183,31 @@ def run(cmd, timeout=20, input_text=None):
         return "", str(e), -1
 
 
-def calculate_bitrate(byte_count, duration):
+def calculate_mbps(byte_count, duration):
     if duration <= 0:
         return 0.0
     return byte_count / duration / 1e6
 
 
 def speed_stats(values):
-    """
-    Statistiques sur les vitesses moyennes PAR CYCLE (MB/s).
-    Écart-type d'échantillon (ddof=1) et CV = std / moyenne * 100.
-    std et cv valent None s'il y a moins de 2 cycles.
-    """
     n = len(values)
-    stats = {"n": n, "mean": None, "std": None, "cv": None}
-    if n == 0:
-        return stats
+
+    if n < 2:
+        return {
+            "n": n,
+            "std": None,
+            "cv": None,
+        }
+
     arr = np.asarray(values, dtype=float)
-    stats["mean"] = float(arr.mean())
-    if n >= 2:
-        stats["std"] = float(arr.std(ddof=1))
-        if stats["mean"] > 0:
-            stats["cv"] = stats["std"] / stats["mean"] * 100.0
-    return stats
+    mean = float(arr.mean())
+    std = float(arr.std(ddof=1))
+
+    return {
+        "n": n,
+        "std": std,
+        "cv": std / mean * 100.0 if mean > 0 else None,
+    }
 
 
 def safe_name(text):
@@ -286,6 +232,21 @@ def root_mount_device():
 
 ROOT_DISK = root_mount_device()
 
+
+def create_result_paths(devnode, serial):
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tag = (
+        f"{stamp}_"
+        f"{safe_name(os.path.basename(devnode))}_"
+        f"{safe_name(serial)}"
+    )
+
+    return {
+        "csv": str(RESULTS_DIR / f"USB_test_{tag}.csv"),
+        "graph": str(RESULTS_DIR / f"USB_READ_WRITE_{tag}.png"),
+        "pdf": str(RESULTS_DIR / f"USB_report_{tag}.pdf"),
+    }
+
 # ============================================================
 # DÉTECTION USB (pyudev)
 # ============================================================
@@ -301,13 +262,6 @@ def usb_parent_device(udev_device):
 
 
 def scan_usb_candidates():
-    """
-    Retourne la liste des devnodes de disques entiers (ex: /dev/sdb)
-    branchés sur bus USB. On travaille toujours au niveau du disque
-    entier : le test est brut (pas de système de fichiers) et la clé
-    est reformatée à la fin, donc les partitions existantes n'ont pas
-    besoin d'être prises en compte individuellement.
-    """
     ctx = pyudev.Context()
     candidates = []
 
@@ -425,299 +379,117 @@ def unmount_all_partitions(disk_devnode):
     for name in out.split():
         run(["umount", f"/dev/{name}"])
 
-# ============================================================
-# SMART (smartctl)
-# ============================================================
-
-NA_TEXT = "non disponible"
-
-# Variables de synthèse comparées avant / après
-SMART_VARIABLES = [
-    "Health", 
-    "Temperature", 
-    "PowerOnHours", 
-    "PowerCycles",
-    "Wear", 
-    "BadBlocks", 
-    "Uncorrectable",
-]
-
-
-def _is_num(x):
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
-
-
-def smart_variables(data, attrs):
-    """
-    Construit le dict {variable: (valeur | None, unité)} à partir de la
-    sortie JSON de smartctl (ATA ou NVMe). None = non disponible.
-    """
-    nvme = data.get("nvme_smart_health_information_log") or {}
-
-    def attr_field(field, *ids):
-        for i in ids:
-            for a in attrs:
-                if a["id"] == i and a.get(field) is not None:
-                    return a[field]
-        return None
-
-    v = {}
-
-    passed = (data.get("smart_status") or {}).get("passed")
-    v["Health"] = (None if passed is None
-                   else ("OK" if passed else "FAILED"), "")
-
-    temp = (data.get("temperature") or {}).get("current")
-    if temp is None:
-        temp = nvme.get("temperature")
-    v["Temperature"] = (temp, " °C")
-
-    poh = (data.get("power_on_time") or {}).get("hours")
-    if poh is None:
-        poh = nvme.get("power_on_hours")
-    if poh is None:
-        poh = attr_field("raw", 9)
-    v["PowerOnHours"] = (poh, " h")
-
-    pc = data.get("power_cycle_count")
-    if pc is None:
-        pc = nvme.get("power_cycles")
-    if pc is None:
-        pc = attr_field("raw", 12)
-    v["PowerCycles"] = (pc, "")
-
-    # Usure : valeur normalisée des attributs d'usure usuels
-    # (177, 231, 233, 202, 173), sinon "percentage_used" en NVMe.
-    wear = attr_field("value", 177, 231, 233, 202, 173)
-    if wear is not None:
-        v["Wear"] = (wear, " (norm.)")
-    elif nvme.get("percentage_used") is not None:
-        v["Wear"] = (nvme["percentage_used"], " % utilisé")
-    else:
-        v["Wear"] = (None, "")
-
-    # Blocs défectueux : Reallocated_Sector_Ct (5) / Runtime_Bad_Block (183)
-    v["BadBlocks"] = (attr_field("raw", 5, 183), "")
-
-    # Erreurs non corrigibles : Reported_Uncorrect (187) /
-    # Offline_Uncorrectable (198), sinon media_errors en NVMe.
-    unc = attr_field("raw", 187, 198)
-    if unc is None:
-        unc = nvme.get("media_errors")
-    v["Uncorrectable"] = (unc, "")
-
-    return v
-
-
-def read_smart(devnode):
-    """
-    Retourne (variables, attrs).
-    variables : dict {nom: (valeur | None, unité)}, cf. smart_variables
-    attrs     : liste de dicts {id, name, value, worst, raw}
-    Si smartctl est absent ou ne répond pas : ({}, []).
-    """
-
-    if not shutil.which("smartctl"):
-        return {}, []
-
-    out, _, _ = run(
-        ["smartctl", "-a", "-j", "-d", "sat", devnode], timeout=25
-    )
-    if not out:
-        out2, _, _ = run(["smartctl", "-a", "-j", devnode], timeout=25)
-        if out2:
-            out = out2
-
-    if not out:
-        return {}, []
-
-    try:
-        data = json.loads(out)
-    except Exception:
-        return {}, []
-
-    table = (data.get("ata_smart_attributes") or {}).get("table", [])
-    attrs = []
-    for a in table:
-        attrs.append({
-            "id": a.get("id"),
-            "name": a.get("name", ""),
-            "value": a.get("value"),
-            "worst": a.get("worst"),
-            "raw": (a.get("raw") or {}).get("value"),
-        })
-
-    return smart_variables(data, attrs), attrs
-
-
-def smart_available(variables, attrs):
-    return bool(attrs) or any(
-        val is not None for val, _ in variables.values())
-
-
-def smart_value_text(var):
-    if not var or var[0] is None:
-        return NA_TEXT
-    return f"{var[0]}{var[1]}"
-
-
-def smart_delta(before, after):
-    if before is None or after is None:
-        return "-"
-    if _is_num(before) and _is_num(after):
-        d = after - before
-        if d == 0:
-            return "="
-        if isinstance(d, int):
-            return f"{d:+d}"
-        return f"{d:+.1f}"
-    return "=" if before == after else "changé"
-
-
-def build_smart_diff(vars_before, attrs_before, vars_after, attrs_after):
-    """Compare deux relevés SMART : variables de synthèse + attributs ATA."""
-
-    if not (smart_available(vars_before, attrs_before)
-            or smart_available(vars_after, attrs_after)):
-        return f"SMART : {NA_TEXT}"
-
-    lines = [f"{'Variable':<16}{'Avant':<18}{'Après':<18}{'Delta':<8}"]
-    for name in SMART_VARIABLES:
-        b = vars_before.get(name, (None, ""))
-        a = vars_after.get(name, (None, ""))
-        lines.append(
-            f"{name:<16}{smart_value_text(b):<18}{smart_value_text(a):<18}"
-            f"{smart_delta(b[0], a[0]):<8}"
-        )
-    lines.append("")
-
-    if not attrs_before and not attrs_after:
-        lines.append(f"Attributs SMART ATA : {NA_TEXT}")
-        return "\n".join(lines)
-
-    lines.append("Attributs SMART ATA (valeur brute)")
-    before = {a["id"]: a for a in attrs_before}
-    after = {a["id"]: a for a in attrs_after}
-    ids = sorted(
-        set(before) | set(after),
-        key=lambda x: (x is None, x if x is not None else 0)
-    )
-
-    lines.append(f"{'ID':<5}{'Name':<28}{'Avant':<14}{'Après':<14}{'Delta':<8}")
-    for i in ids:
-        ab = before.get(i)
-        aa = after.get(i)
-        name = (aa or ab).get("name", "")
-        raw_b = ab["raw"] if ab else "-"
-        raw_a = aa["raw"] if aa else "-"
-        delta = smart_delta(ab["raw"] if ab else None,
-                            aa["raw"] if aa else None)
-        lines.append(
-            f"{str(i):<5}{str(name):<28}{str(raw_b):<14}{str(raw_a):<14}"
-            f"{delta:<8}"
-        )
-
-    return "\n".join(lines)
 
 # ============================================================
 # TEXTES D'INFO / RAPPORT
 # ============================================================
 
-def format_device_block(info):
-    L = ["=== PÉRIPHÉRIQUE ==="]
-    for k, label in (
+def format_device_info(info):
+    fields = (
         ("Date", "Date"),
-        ("Devnode", "Devnode"), 
+        ("Devnode", "Devnode"),
         ("Model", "Model"),
-        ("Manufacturer", "Manufacturer"), 
+        ("Manufacturer", "Manufacturer"),
         ("Serial", "Serial"),
-        ("VID", "VID"), 
-        ("PID", "PID"), 
+        ("VID", "VID"),
+        ("PID", "PID"),
         ("Size_GB", "Size_GB"),
         ("USBVersion", "USB Version"),
-    ):
-        L.append(f"{label:<14}: {info.get(k, 'N/A')}")
-    L.append("")
-    return "\n".join(L)
+    )
+
+    lines = ["=== PÉRIPHÉRIQUE ==="]
+
+    for key, label in fields:
+        lines.append(f"{label:<14}: {info.get(key, 'N/A')}")
+
+    return "\n".join(lines)
 
 
-def format_info_final(info, result, smart_text, reformat_msg):
-    L = [format_device_block(info)]
-    L.append("=== SMART (avant / après test) ===")
-    L.append(smart_text)
-    L.append("")
-    L.append(format_speed_results(result))
-    L.append("=== REFORMATAGE ===")
-    L.append(reformat_msg)
-    L.append("")
-    L.append("")
-    L.append(format_final_results(result))
-    return "\n".join(L)
+def get_fail_reasons(result):
+    reasons = []
 
-
-def format_speed_results(result):
-    L = ["=== RÉSULTATS ==="]
-    L.append(f"{'Erreurs intégrité':<18}: {result['errors']}")
     if result.get("error"):
-        L.append(f"{'Message':<18}: {result['error']}")
-    L.append("")
+        reasons.append(result["error"])
 
-    for label, avg, st in (
+    if result["errors"]:
+        reasons.append(f"{result['errors']} erreur(s) d'intégrité")
+
+    if result["avg_write"] > 0 and result["avg_write"] <= MIN_WRITE_MBPS:
+        reasons.append("Écriture trop lente")
+
+    if result["avg_read"] > 0:
+        if result["avg_read"] <= MIN_READ_MBPS:
+            reasons.append("Lecture trop lente")
+        elif result["avg_read"] >= MAX_READ_MBPS:
+            reasons.append("Lecture trop rapide")
+
+    if not reasons:
+        reasons.append("Test incomplet ou interrompu")
+
+    return reasons
+
+
+def build_report(info, result):
+    lines = [
+        format_device_info(info),
+        "",
+        "=== RÉSULTATS ===",
+        f"{'Erreurs intégrité':<18}: {result['errors']}",
+    ]
+
+    if result.get("error"):
+        lines.append(f"{'Message':<18}: {result['error']}")
+
+    lines.append("")
+
+    for label, avg, stats in (
         ("Écriture", result["avg_write"], result["write_stats"]),
         ("Lecture", result["avg_read"], result["read_stats"]),
     ):
-        L.append(label)
-        L.append(f"  {'Moyenne globale':<16}: {avg:8.2f} MB/s")
-        if st["n"] >= 2:
-            L.append(f"  {'Std (par cycle)':<16}: {st['std']:8.2f} MB/s"
-                     f"   (n = {st['n']} cycles)")
-            cv = (f"{st['cv']:8.2f} %" if st["cv"] is not None else "N/A")
-            L.append(f"  {'CV (par cycle)':<16}: {cv}")
+        lines.append(label)
+        lines.append(f"  {'Moyenne globale':<16}: {avg:8.2f} MB/s")
+
+        if stats["n"] >= 2:
+            lines.append(
+                f"  {'Std (par cycle)':<16}: "
+                f"{stats['std']:8.2f} MB/s   "
+                f"(n = {stats['n']} cycles)"
+            )
+
+            cv = f"{stats['cv']:8.2f} %" if stats["cv"] is not None else "N/A"
+            lines.append(f"  {'CV (par cycle)':<16}: {cv}")
         else:
-            L.append(f"  {'Std / CV':<16}: N/A (moins de 2 cycles mesurés)")
-    L.append("")
-    return "\n".join(L)
+            lines.append(
+                f"  {'Std / CV':<16}: "
+                "N/A (moins de 2 cycles mesurés)"
+            )
 
-def format_final_results(result):
-    L = ["================= RÉSULTAT FINAL ================="]
-    L.append("")
-    L.append(f"{result['result']} {get_fail_reason(result)}")
-    L.append("")
-    L.append("==================================================")
-    L.append("")
-    return "\n".join(L)
+    lines.extend([
+        "",
+        "=== REFORMATAGE ===",
+        result["reformat"],
+        "",
+        "================= RÉSULTAT FINAL =================",
+        "",
+    ])
 
+    if result["result"] == "PASS":
+        lines.append("PASS")
+    else:
+        reasons = get_fail_reasons(result)
+        lines.append("FAIL")
+        lines.extend(f"- {reason}" for reason in reasons)
 
-def format_info_initial(info):
-    return format_device_block(info)
+    lines.extend([
+        "",
+        "==================================================",
+    ])
 
-
-def get_fail_reason(result):
-    if result.get("result") == "PASS":
-        return ""
-
-    reasons = []
-    if result.get("error"):
-        reasons.append ("\n")
-        reasons.append(result["error"])
-    if result.get("errors", 0):
-        reasons.append ("\n")
-        reasons.append(f"{result['errors']} erreur(s) d'intégrité")
-    if result["avg_write"] <= MIN_WRITE_MBPS:
-        reasons.append ("\n")
-        reasons.append("Écriture trop lente")
-    if result["avg_read"] <= MIN_READ_MBPS:
-        reasons.append ("\n")
-        reasons.append("Lecture trop lente")
-    elif result["avg_read"] >= MAX_READ_MBPS:
-        reasons.append ("\n")
-        reasons.append("Lecture trop rapide")
-
-    return " ; ".join(reasons) or "Test incomplet ou interrompu"
+    return "\n".join(lines)
 
 
 def write_pdf_report(path, text, figure=None, lines_per_page=85):
-    """PDF : pages de texte (monospace) puisle graphe."""
+    """PDF : pages de texte (monospace) puis le graphe."""
     lines = text.splitlines() or [""]
     with PdfPages(str(path)) as pdf:
         for start in range(0, len(lines), lines_per_page):
@@ -733,114 +505,72 @@ def write_pdf_report(path, text, figure=None, lines_per_page=85):
 # REFORMATAGE
 # ============================================================
 
-def reformat_device(devnode, fs_type, label):
-    """
-    Reformate le périphérique avec le système de fichiers choisi.
+FS_CONFIG = {
+        "exfat": {
+            "tool": "mkfs.exfat",
+            "args": [],
+            "label_arg": "-n",
+            "blkid": "exfat",
+            "package": "exfatprogs",
+        },
+        "fat32": {
+            "tool": "mkfs.vfat",
+            "args": ["-F", "32"],
+            "label_arg": "-n",
+            "blkid": "vfat",
+            "package": "dosfstools",
+        },
+        "ntfs": {
+            "tool": "mkfs.ntfs",
+            "args": ["-F"],
+            "label_arg": "-n",
+            "blkid": "ntfs",
+            "package": "ntfs-3g",
+        },
+    }
 
-    fs_type :
-        "exfat"
-        "fat32"
-        "ntfs"
-    """
-
+def format_device(devnode, fs_type, label=""):
     fs_type = fs_type.lower().strip()
+
+    if fs_type not in FS_CONFIG:
+        raise ValueError(f"Système de fichiers non supporté : {fs_type}")
+
+    cfg = FS_CONFIG[fs_type]
+
+    if not shutil.which(cfg["tool"]):
+        raise RuntimeError(
+            f"{cfg['tool']} introuvable "
+            f"(installer le paquet {cfg['package']})."
+        )
 
     unmount_all_partitions(devnode)
 
-    if fs_type == "exfat":
-        tool = "mkfs.exfat"
+    cmd = [cfg["tool"], *cfg["args"]]
 
-        if not shutil.which(tool):
-            raise RuntimeError(
-                "mkfs.exfat introuvable "
-                "(installer le paquet exfatprogs)."
-            )
+    if label:
+        cmd += [cfg["label_arg"], label]
 
-        cmd = [tool]
-
-        if label:
-            cmd += ["-n", label]
-
-        cmd += [devnode]
-
-    elif fs_type == "fat32":
-        tool = "mkfs.vfat"
-
-        if not shutil.which(tool):
-            raise RuntimeError(
-                "mkfs.vfat introuvable "
-                "(installer le paquet dosfstools)."
-            )
-
-        cmd = [tool, "-F", "32"]
-
-        if label:
-            cmd += ["-n", label]
-
-        cmd += [devnode]
-
-    elif fs_type == "ntfs":
-        tool = "mkfs.ntfs"
-
-        if not shutil.which(tool):
-            raise RuntimeError(
-                "mkfs.ntfs introuvable "
-                "(installer le paquet ntfs-3g)."
-            )
-
-        cmd = [tool, "-F"]
-
-        if label:
-            cmd += ["-n", label]
-
-        cmd += [devnode]
-
-    else:
-        raise ValueError(
-            f"Système de fichiers non supporté : {fs_type}. "
-            "Choisir 'exfat', 'fat32' ou 'ntfs'."
-        )
+    cmd.append(devnode)
 
     out, err, rc = run(cmd, timeout=120)
 
     if rc != 0:
-        raise RuntimeError(
-            err or out or
-            f"Reformatage {fs_type} échoué"
-        )
+        raise RuntimeError(err or out or f"Reformatage {fs_type} échoué")
 
     run(["udevadm", "settle"], timeout=10)
 
-def verify_filesystem(devnode, fs_type):
-    expected_blkid = {
-        "exfat": "exfat",
-        "fat32": "vfat",
-        "ntfs": "ntfs",
-    }
-
-    fs_type = fs_type.lower().strip()
-
-    if fs_type not in expected_blkid:
-        raise ValueError(
-            f"Système de fichiers non supporté : {fs_type}"
-        )
-
     out, err, rc = run(
         ["blkid", "-o", "value", "-s", "TYPE", devnode],
-        timeout=10
+        timeout=10,
     )
 
     detected = out.strip().lower()
 
-    expected = expected_blkid[fs_type]
-
-    if rc != 0 or detected != expected:
+    if rc != 0 or detected != cfg["blkid"]:
         raise RuntimeError(
             f"{fs_type.upper()} non détecté après reformatage "
-            f"(blkid : {detected or 'inconnu'}, attendu : {expected})"
+            f"(blkid : {detected or 'inconnu'}, attendu : {cfg['blkid']})"
         )
-
-    return detected
 
 # ============================================================
 # E/S SANS CACHE (O_DIRECT)
@@ -855,12 +585,6 @@ def make_aligned_buffer(size, fill=None):
 
 
 def open_direct_device(devnode, mode):
-    """
-    mode: 'w' (écriture, write-through) ou 'r' (lecture).
-    Le devnode existe déjà : pas de O_CREAT/O_TRUNC.
-    Retombe sans O_DIRECT si non supporté (rare sur un périphérique
-    bloc, mais certains adaptateurs/USB-SCSI l'exigent).
-    """
     if mode == "w":
         base_flags = os.O_WRONLY | os.O_SYNC
     else:
@@ -932,7 +656,8 @@ def new_result(devnode):
         "errors": 0, 
         "error": "",
         "result": "FAIL", 
-        "reformat": ""
+        "reformat": "",
+        "completed": False,
     }
 
 
@@ -964,11 +689,6 @@ class TestWorker(QThread):
             result = new_result(self.devnode)
             result["error"] = str(e)
 
-        # Sorties anticipées / exception : on complète le rapport
-        if not result.get("report"):
-            result["report"] = (
-                self._last_info + "\n" + format_speed_results(result)).strip()
-
         self.test_done.emit(result)
 
     def _run_test(self):
@@ -984,19 +704,9 @@ class TestWorker(QThread):
         result["model"] = info["Model"]
         result["serial"] = info["Serial"]
 
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tag = f"{stamp}_{safe_name(os.path.basename(devnode))}_{safe_name(info['Serial'])}"
-        csv_file = RESULTS_DIR / f"USB_test_{tag}.csv"
-        graph_file = RESULTS_DIR / f"USB_READ_WRITE_{tag}.png"
-        pdf_file = RESULTS_DIR / f"USB_report_{tag}.pdf"
-        result["csv"] = str(csv_file)
-        result["graph"] = str(graph_file)
-        result["pdf"] = str(pdf_file)
+        result.update(create_result_paths(devnode, info["Serial"]))
 
-        # ---------------- SMART avant test ----------------
-        self.status.emit("Lecture SMART (avant test)...")
-        smart_vars_before, smart_attrs_before = read_smart(devnode)
-        self._emit_info(format_info_initial(info))
+        self._emit_info(format_device_info(info))
 
         # ---------------- Accès brut ----------------
         self.status.emit("Démontage / accès brut au périphérique...")
@@ -1029,10 +739,10 @@ class TestWorker(QThread):
         io_failed = False
         direct_ok = True
 
-        csv_handle = open(csv_file, "w", newline="", encoding="utf-8")
+        csv_handle = open(result["csv"], "w", newline="", encoding="utf-8")
         writer = csv.writer(csv_handle)
         writer.writerow(["Cycle", "Operation", "Block", "Relative_Time_s",
-                         "Bitrate_MB_s", "Integrity", "Errors"])
+                         "MB/s", "Integrity", "Errors"])
 
         global_start = time.perf_counter()
 
@@ -1072,49 +782,29 @@ class TestWorker(QThread):
 
                 # ================= WRITE =================
                 self.status.emit(f"Cycle {label_cycle} - ÉCRITURE")
-                cw_bytes = 0
-                cw_time = 0.0
 
                 try:
-                    fd, direct_ok = open_direct_device(devnode, "w")
-                    try:
-                        for block_number in range(NUMBER_BLOCKS):
-                            if self._abort:
-                                break
-                            t0 = time.perf_counter_ns()
-                            written = os.writev(fd, [write_buffer])
-                            t1 = time.perf_counter_ns()
+                    written, write_time, phase_direct = self._write_cycle(
+                        devnode,
+                        write_buffer,
+                        cycle,
+                        writer,
+                        elapsed,
+                        emit_progress,
+                    )
 
-                            if written != BLOCK_SIZE:
-                                raise OSError(
-                                    f"Écriture partielle ({written} octets)")
+                    total_written += written
+                    write_io_time += write_time
+                    direct_ok &= phase_direct
 
-                            duration = (t1 - t0) / 1e9
-                            bitrate = calculate_bitrate(written, duration)
-                            rel = elapsed()
-
-                            total_written += written
-                            write_io_time += duration
-                            cw_bytes += written
-                            cw_time += duration
-
-                            writer.writerow([cycle, "WRITE", block_number,
-                                             rel, bitrate, 1, errors])
-                            self.sample.emit("WRITE", rel, bitrate)
-                            emit_progress("write", block_number)
-                            if TEST_LIMIT_MODE == "duration" and elapsed() >= TEST_DURATION:
-                                break
-
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
+                    if write_time > 0:
+                        cycle_write_speeds.append(
+                            calculate_mbps(written, write_time)
+                        )
 
                 except Exception as e:
                     io_failed = True
                     result["error"] = f"Erreur écriture : {e}"
-
-                if cw_time > 0:
-                    cycle_write_speeds.append(cw_bytes / cw_time / 1e6)
 
                 if io_failed or self._abort:
                     break
@@ -1123,56 +813,32 @@ class TestWorker(QThread):
 
                 # ================= READ =================
                 self.status.emit(f"Cycle {label_cycle} - LECTURE")
-                cr_bytes = 0
-                cr_time = 0.0
 
                 try:
-                    fd, direct_ok = open_direct_device(devnode, "r")
-                    try:
-                        for block_number in range(NUMBER_BLOCKS):
-                            if self._abort:
-                                break
-                            t0 = time.perf_counter_ns()
-                            n = os.readv(fd, [read_buffer])
-                            t1 = time.perf_counter_ns()
+                    read_bytes, read_time, read_errors, phase_direct = self._read_cycle(
+                        devnode,
+                        read_buffer,
+                        reference_hash,
+                        cycle,
+                        writer,
+                        elapsed,
+                        emit_progress,
+                        errors,
+                    )
 
-                            if n == 0:
-                                break
+                    total_read += read_bytes
+                    read_io_time += read_time
+                    errors += read_errors
+                    direct_ok &= phase_direct
 
-                            duration = (t1 - t0) / 1e9
-                            bitrate = calculate_bitrate(n, duration)
-
-                            total_read += n
-                            read_io_time += duration
-                            cr_bytes += n
-                            cr_time += duration
-
-                            received = bytes(read_buffer[:n])
-                            h = hashlib.sha256(received).digest()
-
-                            if n != BLOCK_SIZE or h != reference_hash:
-                                errors += 1
-                                integrity = 0
-                            else:
-                                integrity = 1
-
-                            rel = elapsed()
-                            writer.writerow([cycle, "READ", block_number,
-                                             rel, bitrate, integrity, errors])
-                            self.sample.emit("READ", rel, bitrate)
-                            emit_progress("read", block_number)
-                            if TEST_LIMIT_MODE == "duration" and elapsed() >= TEST_DURATION:
-                                break
-
-                    finally:
-                        os.close(fd)
+                    if read_time > 0:
+                        cycle_read_speeds.append(
+                            calculate_mbps(read_bytes, read_time)
+                        )
 
                 except Exception as e:
                     io_failed = True
                     result["error"] = f"Erreur lecture : {e}"
-
-                if cr_time > 0:
-                    cycle_read_speeds.append(cr_bytes / cr_time / 1e6)
 
         finally:
             csv_handle.close()
@@ -1185,21 +851,24 @@ class TestWorker(QThread):
         avg_read = (total_read / read_io_time / 1e6
                     if read_io_time else 0.0)
 
-        completed = (not self._abort and total_written > 0
+        completed = (not self._abort 
+                     and not io_failed
+                     and total_written > 0
                      and total_read > 0)
 
         result.update({
-            "avg_write": avg_write, 
+            "avg_write": avg_write,
             "avg_read": avg_read,
             "write_stats": speed_stats(cycle_write_speeds),
             "read_stats": speed_stats(cycle_read_speeds),
-            "errors": errors, 
-            "result": "PASS" if (errors == 0 and
-                                 completed and 
-                                 avg_write > MIN_WRITE_MBPS and 
-                                 avg_read > MIN_READ_MBPS and 
-                                 avg_read < MAX_READ_MBPS) 
-                                else "FAIL"
+            "errors": errors,
+            "completed": completed,
+            "result": "PASS" if (
+                errors == 0
+                and completed
+                and avg_write > MIN_WRITE_MBPS
+                and MIN_READ_MBPS < avg_read < MAX_READ_MBPS
+            ) else "FAIL",
         })
         if self._abort and not result["error"]:
             result["error"] = "Test interrompu"
@@ -1207,21 +876,12 @@ class TestWorker(QThread):
             result["error"] = ("O_DIRECT non supporté "
                                "(résultats via cache, à relativiser)")
 
-        # ---------------- SMART après test ----------------
-        self.status.emit("Lecture SMART (après test)...")
-        smart_vars_after, smart_attrs_after = read_smart(devnode)
-        smart_text = build_smart_diff(
-            smart_vars_before, smart_attrs_before,
-            smart_vars_after, smart_attrs_after
-        )
 
         # ---------------- Reformatage ----------------
         self.status.emit(f"Reformatage en {REFORMAT_FS.upper()}...")
         reformat_ok = False
         try:
-            reformat_device(devnode, REFORMAT_FS, REFORMAT_LABEL)
-            self.status.emit("Vérification du système de fichiers...")
-            verify_filesystem(devnode, REFORMAT_FS)
+            format_device(devnode, REFORMAT_FS, REFORMAT_LABEL)
             reformat_msg = (f"OK - {devnode} reformaté en {REFORMAT_FS.upper()} "
                             "et vérifié.")
             reformat_ok = True
@@ -1237,17 +897,154 @@ class TestWorker(QThread):
 
         result["reformat"] = reformat_msg
 
-        report = format_info_final(info, result, smart_text, reformat_msg)
+        report = build_report(info, result)
         result["report"] = report
         self._emit_info(report)
 
         return result
 
+
+    def _write_cycle(
+    self,
+    devnode,
+    buffer,
+    cycle,
+    writer,
+    elapsed,
+    emit_progress,
+):
+        bytes_done = 0
+        io_time = 0.0
+        direct_ok = True
+
+        fd, direct_ok = open_direct_device(devnode, "w")
+
+        try:
+            for block_number in range(NUMBER_BLOCKS):
+                if self._abort:
+                    break
+
+                t0 = time.perf_counter_ns()
+                written = os.writev(fd, [buffer])
+                t1 = time.perf_counter_ns()
+
+                if written != BLOCK_SIZE:
+                    raise OSError(
+                        f"Écriture partielle ({written} octets)"
+                    )
+
+                duration = (t1 - t0) / 1e9
+                mbps = calculate_mbps(written, duration)
+                rel = elapsed()
+
+                bytes_done += written
+                io_time += duration
+
+                writer.writerow([
+                    cycle,
+                    "WRITE",
+                    block_number,
+                    rel,
+                    mbps,
+                    1,
+                    0,
+                ])
+
+                self.sample.emit("WRITE", rel, mbps)
+                emit_progress("write", block_number)
+
+                if (
+                    TEST_LIMIT_MODE == "duration"
+                    and elapsed() >= TEST_DURATION
+                ):
+                    break
+
+            os.fsync(fd)
+
+        finally:
+            os.close(fd)
+
+        return bytes_done, io_time, direct_ok
+    
+
+    def _read_cycle(
+        self,
+        devnode,
+        buffer,
+        reference_hash,
+        cycle,
+        writer,
+        elapsed,
+        emit_progress,
+        initial_errors=0,
+    ):
+        bytes_done = 0
+        io_time = 0.0
+        errors_found = 0
+
+        fd, direct_ok = open_direct_device(devnode, "r")
+
+        try:
+            for block_number in range(NUMBER_BLOCKS):
+                if self._abort:
+                    break
+
+                # Mesure uniquement l'E/S.
+                t0 = time.perf_counter_ns()
+                n = os.readv(fd, [buffer])
+                t1 = time.perf_counter_ns()
+
+                if n == 0:
+                    break
+
+                duration = (t1 - t0) / 1e9
+                mbps = calculate_mbps(n, duration)
+
+                bytes_done += n
+                io_time += duration
+
+                # Contrôle d'intégrité hors chronométrage.
+                received = bytes(buffer[:n])
+                received_hash = hashlib.sha256(received).digest()
+
+                if n != BLOCK_SIZE or received_hash != reference_hash:
+                    errors_found += 1
+                    integrity = 0
+                else:
+                    integrity = 1
+
+                rel = elapsed()
+                total_errors = initial_errors + errors_found
+
+                writer.writerow([
+                    cycle,
+                    "READ",
+                    block_number,
+                    rel,
+                    mbps,
+                    integrity,
+                    total_errors,
+                ])
+
+                self.sample.emit("READ", rel, mbps)
+                emit_progress("read", block_number)
+
+                if (
+                    TEST_LIMIT_MODE == "duration"
+                    and elapsed() >= TEST_DURATION
+                ):
+                    break
+
+        finally:
+            os.close(fd)
+
+        return bytes_done, io_time, errors_found, direct_ok
+
 # ============================================================
 # GUI
 # ============================================================
 
-WAITING_INSERT, READY, TESTING, WAITING_REMOVAL = range(4)
+WAITING_INSERT, READY, TESTING, WAITING_REMOVAL, WAITING_CONTINUE = range(5)
 
 COLORS = {
     "wait": "#1f4e79",
@@ -1324,6 +1121,13 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.on_start_clicked)
         root.addWidget(self.start_button)
+
+        self.continue_button = QPushButton("CONTINUE")
+        self.continue_button.setFont(QFont("Sans", 16 if DEV_MODE else 28, QFont.Bold))
+        self.continue_button.setMinimumHeight(60 if DEV_MODE else 110)
+        self.continue_button.clicked.connect(self.on_continue_clicked)
+        self.continue_button.hide()
+        root.addWidget(self.continue_button)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -1405,14 +1209,33 @@ class MainWindow(QMainWindow):
 
     def _init_axes(self):
         self.ax.clear()
+
         self.ax.set_xlabel("Test Time [min]")
-        self.ax.set_ylabel("Bitrate [MB/s]")
-        self.ax.set_title(f"USB Read / Write Bitrate ({TEST_FILE_SIZE_MB} MB file, {BLOCK_SIZE_MB} MB blocks)")
+        self.ax.set_ylabel("Speed [MB/s]")
+        self.ax.set_title(
+            f"USB Read / Write Speed "
+            f"({TEST_FILE_SIZE_MB} MB test, {BLOCK_SIZE_MB} MB blocks)"
+        )
+
         self.ax.grid(True, alpha=0.3)
-        (self.line_w,) = self.ax.plot([], [], linewidth=1,
-                                      label="Write Bitrate")
-        (self.line_r,) = self.ax.plot([], [], linewidth=1,
-                                      label="Read Bitrate")
+
+        # Mesures
+        (self.line_w,) = self.ax.plot([], [],linewidth=1,label="Write Speed")
+        (self.line_r,) = self.ax.plot([], [],linewidth=1,label="Read Speed")
+
+        # Seuils PASS / FAIL
+        self.ax.axhline(
+            MIN_WRITE_MBPS,
+            linestyle="--",
+            color="darkblue",
+            label=f"Min Write: {MIN_WRITE_MBPS:g} MB/s")
+
+        self.ax.axhline(
+            MIN_READ_MBPS,
+            linestyle="--",
+            color="darkorange",
+            label=f"Min Read: {MIN_READ_MBPS:g} MB/s")
+
         self.ax.legend(loc="lower left")
         self.figure.tight_layout()
         self.canvas.draw_idle()
@@ -1478,7 +1301,7 @@ class MainWindow(QMainWindow):
             others = ", ".join(self.usb_devnodes)
             self._set_user_status(f"{TXT_TOO_MANY}\n({others})")
         self._dev_status("clé détectée, en attente de START")
-        self._render_info(format_device_block(info))
+        self._render_info(format_device_info(info))
         self.start_button.setEnabled(single)
 
     def _go_waiting_insert(self):
@@ -1486,10 +1309,12 @@ class MainWindow(QMainWindow):
         self.current_devnode = None
         self._ready_snapshot = None
         self.start_button.setEnabled(False)
+        self.continue_button.hide()
         self.progress.setValue(0)
         self._set_banner(TXT_INSERT, COLORS["wait"])
         self._set_user_status("")
         self._dev_status("en attente d'une clé")
+
         if self.usb_devnodes:
             self._go_ready(self.usb_devnodes[0])
 
@@ -1501,11 +1326,19 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_test(self.current_devnode)
 
+    def on_continue_clicked(self):
+        if self.state != WAITING_CONTINUE:
+            return
+
+        self.continue_button.hide()
+        self._go_waiting_insert()
+
     # ---------------- Test ----------------
 
     def start_test(self, devnode):
         self.state = TESTING
         self.current_devnode = devnode
+        self.continue_button.hide()
         self._reset_series()
         self._init_axes()
         self._render_info("")
@@ -1570,16 +1403,22 @@ class MainWindow(QMainWindow):
 
         # Le PDF est écrit AVANT la bannière : on laisse d'abord la boucle
         # d'événements repeindre le statut, puis _finalize fait le reste.
-        self._set_user_status("Génération du rapport...")
+        self._dev_status("Génération du rapport...")
         QTimer.singleShot(0, lambda: self._finalize(r, passed))
 
     def _finalize(self, r, passed):
-        """Dernière étape du cycle : PDF, puis seulement PASS / FAIL."""
-        self._write_pdf(r)      # ne lève jamais (try/except interne)
+        self._write_pdf(r)
+
+        if not r.get("completed", False):
+            self.state = WAITING_CONTINUE
+            self._set_banner(TXT_INTERRUPT, COLORS["fail"])
+            self._set_user_status("")
+            self.continue_button.show()
+            return
 
         self.state = WAITING_REMOVAL
-        self._set_banner(TXT_PASS if passed else TXT_FAIL,
-                         COLORS["pass"] if passed else COLORS["fail"])
+        self.continue_button.hide()
+        self._set_banner(TXT_PASS if passed else TXT_FAIL, COLORS["pass"] if passed else COLORS["fail"])
         self._set_user_status(TXT_REMOVE)
 
         if self.current_devnode not in self.usb_devnodes:
