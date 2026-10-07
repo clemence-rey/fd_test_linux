@@ -140,10 +140,10 @@ DEV_MODE = True
 
 # Condition d'arrêt du test : "duration" (durée fixe) ou "cycles"
 # (nombre de cycles écriture+lecture complets).
-TEST_LIMIT_MODE = "duration"
+TEST_LIMIT_MODE = "cycles"
 
-TEST_DURATION_MIN = 1      # utilisé si TEST_LIMIT_MODE == "duration"
-TEST_CYCLES = 3             # utilisé si TEST_LIMIT_MODE == "cycles"
+TEST_DURATION_MIN = .5      # utilisé si TEST_LIMIT_MODE == "duration"
+TEST_CYCLES = 2            # utilisé si TEST_LIMIT_MODE == "cycles"
 
 TEST_FILE_SIZE_MB = 512   # quantité de données écrite/lue par cycle
 BLOCK_SIZE_MB = 4
@@ -156,6 +156,7 @@ MAX_READ_MBPS = 500.0
 # Reformatage automatique de la clé à la fin du test.
 # Valeurs possibles : "exfat", "fat32", "ntfs"
 REFORMAT_FS = "fat32"
+REFORMAT_LABEL = "FISCHER"
 
 
 BLOCK_SIZE = BLOCK_SIZE_MB * 1024 * 1024
@@ -639,72 +640,6 @@ def format_device_block(info):
     L.append("")
     return "\n".join(L)
 
-def format_legend():
-    mb = BLOCK_SIZE / 1024 ** 2
-    L = ["=== LÉGENDE : VARIABLES ET CALCULS ==="]
-    L += [
-        "",
-        "-- Périphérique --",
-        "Devnode      : disque entier testé (pas de partition), ex. /dev/sdb.",
-        "Model/Manuf. : lsblk (MODEL/VENDOR) ; à défaut, descripteurs USB (udev).",
-        "Serial       : numéro de série vu par lsblk.",
-        "VID / PID    : idVendor / idProduct du noeud USB parent (sysfs).",
-        "Size_GB      : taille en octets / 1e9 (GB décimaux, pas GiB).",
-        "USB Version  : vitesse NÉGOCIÉE du lien (sysfs 'speed', tolérance 5 %),",
-        "               pas la version annoncée de la clé : un port ou câble",
-        "               USB 2.0 affichera 480 Mb/s même avec une clé USB 3.",
-        "",
-        "-- SMART (smartctl -a -j, pass-through SAT) --",
-        "Relevé fait avant puis après le test. Delta = Après - Avant :",
-        "  '=' identique, '+N'/'-N' variation, '-' valeur manquante d'un côté,",
-        "  'changé' pour une valeur non numérique.",
-        "'non disponible' : la clé / son pont USB ne transmet pas le SMART",
-        "(cas très courant sur les clés USB).",
-        "Health        : verdict global smart_status.passed (OK / FAILED).",
-        "Temperature   : température courante en °C.",
-        "PowerOnHours  : heures sous tension ; à défaut attribut ATA 9 (brut).",
-        "PowerCycles   : nombre de cycles d'alimentation ; à défaut attribut 12.",
-        "Wear          : usure. Valeur NORMALISÉE (non brute) du 1er attribut",
-        "                trouvé parmi 177, 231, 233, 202, 173 (100 = neuf, baisse",
-        "                avec l'usure) ; sinon NVMe percentage_used (% utilisé,",
-        "                monte avec l'usure). Les deux sens sont donc opposés.",
-        "BadBlocks     : valeur brute de l'attribut 5 (Reallocated_Sector_Ct),",
-        "                sinon 183 (Runtime_Bad_Block).",
-        "Uncorrectable : valeur brute de l'attribut 187, sinon 198 ; à défaut",
-        "                media_errors (NVMe).",
-        "Tableau ATA   : valeur BRUTE de chaque attribut, avant / après.",
-        "",
-        "-- Résultats du test --",
-        f"Bloc de test  : {mb:g} MiB de données aléatoires (os.urandom), écrit",
-        f"                {NUMBER_BLOCKS} fois par cycle (= {TEST_FILE_SIZE_MB} MB",
-        "                par phase), accès brut O_DIRECT / O_SYNC.",
-        "Cycle         : une phase d'écriture complète puis une phase de lecture.",
-        "Erreurs int.  : nombre de blocs relus dont le SHA-256 diffère de celui",
-        "                du bloc de référence (ou de taille incorrecte).",
-        "Déconnexions  : nombre d'erreurs d'E/S fatales (exception à l'écriture",
-        "                ou à la lecture, périphérique inaccessible). Le test",
-        "                s'arrête à la première.",
-        "Moyenne glob. : total des octets / SOMME des temps d'E/S, en MB/s",
-        "                (1 MB = 1e6 octets). Seuls les appels writev/readv sont",
-        "                chronométrés : SHA-256, CSV et GUI sont exclus.",
-        "Vitesse cycle : octets du cycle / temps d'E/S du cycle (par phase).",
-        "Std (cycle)   : écart-type d'échantillon (ddof=1) des vitesses par cycle.",
-        "CV (cycle)    : Std / moyenne des vitesses par cycle x 100 (en %).",
-        "                Plus il est bas, plus la clé est régulière.",
-        "                N/A si moins de 2 cycles. La moyenne des cycles peut",
-        "                différer légèrement de la moyenne globale ci-dessus.",
-        "",
-        "-- Critères PASS / FAIL --",
-        "PASS si : 0 erreur d'intégrité, 0 déconnexion, test complet",
-        f"  (écriture ET lecture effectuées, non interrompu),",
-        f"  écriture > {MIN_WRITE_MBPS:g} MB/s,",
-        f"  {MIN_READ_MBPS:g} MB/s < lecture < {MAX_READ_MBPS:g} MB/s.",
-        "  Une lecture trop rapide est jugée suspecte (cache, mesure non fiable).",
-        "Sinon FAIL, avec la ou les raisons indiquées dans RÉSULTAT FINAL.",
-        "",
-    ]
-    return "\n".join(L)
-
 
 def format_info_final(info, result, smart_text, reformat_msg):
     L = [format_device_block(info)]
@@ -715,7 +650,6 @@ def format_info_final(info, result, smart_text, reformat_msg):
     L.append("=== REFORMATAGE ===")
     L.append(reformat_msg)
     L.append("")
-#    L.append(format_legend())
     L.append("")
     L.append(format_final_results(result))
     return "\n".join(L)
@@ -724,7 +658,6 @@ def format_info_final(info, result, smart_text, reformat_msg):
 def format_speed_results(result):
     L = ["=== RÉSULTATS ==="]
     L.append(f"{'Erreurs intégrité':<18}: {result['errors']}")
-    L.append(f"{'Déconnexions':<18}: {result['disconnects']}")
     if result.get("error"):
         L.append(f"{'Message':<18}: {result['error']}")
     L.append("")
@@ -765,24 +698,22 @@ def get_fail_reason(result):
 
     reasons = []
     if result.get("error"):
+        reasons.append ("\n")
         reasons.append(result["error"])
     if result.get("errors", 0):
+        reasons.append ("\n")
         reasons.append(f"{result['errors']} erreur(s) d'intégrité")
-    if result.get("disconnects", 0):
-        reasons.append(f"{result['disconnects']} déconnexion(s)")
     if result["avg_write"] <= MIN_WRITE_MBPS:
+        reasons.append ("\n")
         reasons.append("Écriture trop lente")
     if result["avg_read"] <= MIN_READ_MBPS:
+        reasons.append ("\n")
         reasons.append("Lecture trop lente")
     elif result["avg_read"] >= MAX_READ_MBPS:
+        reasons.append ("\n")
         reasons.append("Lecture trop rapide")
 
     return " ; ".join(reasons) or "Test incomplet ou interrompu"
-
-
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.figure import Figure
-import textwrap
 
 
 def write_pdf_report(path, text, figure=None, lines_per_page=85):
@@ -802,7 +733,7 @@ def write_pdf_report(path, text, figure=None, lines_per_page=85):
 # REFORMATAGE
 # ============================================================
 
-def reformat_device(devnode, fs_type):
+def reformat_device(devnode, fs_type, label):
     """
     Reformate le périphérique avec le système de fichiers choisi.
 
@@ -827,6 +758,9 @@ def reformat_device(devnode, fs_type):
 
         cmd = [tool]
 
+        if label:
+            cmd += ["-n", label]
+
         cmd += [devnode]
 
     elif fs_type == "fat32":
@@ -840,6 +774,9 @@ def reformat_device(devnode, fs_type):
 
         cmd = [tool, "-F", "32"]
 
+        if label:
+            cmd += ["-n", label]
+
         cmd += [devnode]
 
     elif fs_type == "ntfs":
@@ -852,6 +789,9 @@ def reformat_device(devnode, fs_type):
             )
 
         cmd = [tool, "-F"]
+
+        if label:
+            cmd += ["-n", label]
 
         cmd += [devnode]
 
@@ -978,12 +918,21 @@ class UsbWatcher(QThread):
 
 def new_result(devnode):
     return {
-        "devnode": devnode, "model": "N/A", "serial": "N/A",
-        "csv": "", "graph": "", "pdf": "", "report": "",
-        "avg_write": 0.0, "avg_read": 0.0,
-        "write_stats": speed_stats([]), "read_stats": speed_stats([]),
-        "errors": 0, "disconnects": 0, "error": "",
-        "result": "FAIL", "reformat": ""
+        "devnode": devnode, 
+        "model": "N/A", 
+        "serial": "N/A",
+        "csv": "", 
+        "graph": "", 
+        "pdf": "", 
+        "report": "",
+        "avg_write": 0.0, 
+        "avg_read": 0.0,
+        "write_stats": speed_stats([]), 
+        "read_stats": speed_stats([]),
+        "errors": 0, 
+        "error": "",
+        "result": "FAIL", 
+        "reformat": ""
     }
 
 
@@ -1014,7 +963,6 @@ class TestWorker(QThread):
         except Exception as e:
             result = new_result(self.devnode)
             result["error"] = str(e)
-            result["disconnects"] = 1
 
         # Sorties anticipées / exception : on complète le rapport
         if not result.get("report"):
@@ -1058,7 +1006,6 @@ class TestWorker(QThread):
             device_size = get_device_size(devnode)
         except Exception as e:
             result["error"] = f"Périphérique inaccessible : {e}"
-            result["disconnects"] = 1
             return result
 
         if device_size < FILE_SIZE * 1.1:
@@ -1073,7 +1020,6 @@ class TestWorker(QThread):
         read_buffer = make_aligned_buffer(BLOCK_SIZE)
 
         errors = 0
-        disconnects = 0
         total_written = total_read = 0
         write_io_time = read_io_time = 0.0
         cycle_write_speeds = []     # MB/s moyen de chaque phase écriture
@@ -1164,7 +1110,6 @@ class TestWorker(QThread):
                         os.close(fd)
 
                 except Exception as e:
-                    disconnects += 1
                     io_failed = True
                     result["error"] = f"Erreur écriture : {e}"
 
@@ -1223,7 +1168,6 @@ class TestWorker(QThread):
                         os.close(fd)
 
                 except Exception as e:
-                    disconnects += 1
                     io_failed = True
                     result["error"] = f"Erreur lecture : {e}"
 
@@ -1250,10 +1194,12 @@ class TestWorker(QThread):
             "write_stats": speed_stats(cycle_write_speeds),
             "read_stats": speed_stats(cycle_read_speeds),
             "errors": errors, 
-            "disconnects": disconnects,
-            "result": "PASS" if (errors == 0 and disconnects == 0 and completed and 
-                                 avg_write > MIN_WRITE_MBPS and avg_read > MIN_READ_MBPS and avg_read < MAX_READ_MBPS) 
-                                 else "FAIL"
+            "result": "PASS" if (errors == 0 and
+                                 completed and 
+                                 avg_write > MIN_WRITE_MBPS and 
+                                 avg_read > MIN_READ_MBPS and 
+                                 avg_read < MAX_READ_MBPS) 
+                                else "FAIL"
         })
         if self._abort and not result["error"]:
             result["error"] = "Test interrompu"
@@ -1273,7 +1219,7 @@ class TestWorker(QThread):
         self.status.emit(f"Reformatage en {REFORMAT_FS.upper()}...")
         reformat_ok = False
         try:
-            reformat_device(devnode, REFORMAT_FS)
+            reformat_device(devnode, REFORMAT_FS, REFORMAT_LABEL)
             self.status.emit("Vérification du système de fichiers...")
             verify_filesystem(devnode, REFORMAT_FS)
             reformat_msg = (f"OK - {devnode} reformaté en {REFORMAT_FS.upper()} "
@@ -1326,8 +1272,6 @@ class MainWindow(QMainWindow):
         self.current_devnode = None
         self.worker = None
         self.graph_dirty = False
-        self.n_pass = 0
-        self.n_fail = 0
         self.history = []          # lignes d'historique (plus récent d'abord)
         self.current_info = ""     # texte du test courant (zone de gauche)
         self._ready_snapshot = None
@@ -1617,10 +1561,7 @@ class MainWindow(QMainWindow):
                 pass
 
         passed = r["result"] == "PASS"
-        if passed:
-            self.n_pass += 1
-        else:
-            self.n_fail += 1
+
         self.progress.setValue(100)
 
         # Zone de texte : rapport complet + historique
