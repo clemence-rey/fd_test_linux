@@ -754,14 +754,16 @@ class TestWorker(QThread):
 
         def emit_progress(phase=None, block_number=0):
             nonlocal last_pct
+
             if TEST_LIMIT_MODE == "cycles":
                 frac = (block_number + 1) / NUMBER_BLOCKS
                 half = 0.5 * frac
-                cyc_frac = half if phase == "write" else 0.5 + half
-                pct = min(100, int(
-                    ((cycle - 1) + cyc_frac) / TEST_CYCLES * 100))
+                cyc_frac = (half if phase == "write" else 0.5 + half)
+                pct = min(95, int(((cycle - 1) + cyc_frac)/ TEST_CYCLES* 95))
+
             else:
-                pct = min(100, int(elapsed() / TEST_DURATION * 100))
+                pct = min(95, int(elapsed() / TEST_DURATION * 95))
+
             if pct != last_pct:
                 last_pct = pct
                 self.progress.emit(pct)
@@ -1396,8 +1398,6 @@ class MainWindow(QMainWindow):
 
         passed = r["result"] == "PASS"
 
-        self.progress.setValue(100)
-
         # Zone de texte : rapport complet + historique
         self._add_history(r)
         self._render_info(r.get("report") or self.current_info)
@@ -1409,6 +1409,7 @@ class MainWindow(QMainWindow):
 
     def _finalize(self, r, passed):
         self._write_pdf(r)
+        self.progress.setValue(100)
 
         if not r.get("completed", False):
             self.state = WAITING_RESTART
