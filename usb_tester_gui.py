@@ -16,9 +16,8 @@
 #   6. reformate et vérifie la clé ;
 #   7. génère un CSV, un graphe PNG et un rapport PDF.
 #
-# Le test peut être limité par un nombre de cycles ou une durée.
-# Les E/S utilisent O_DIRECT lorsque disponible afin de limiter
-# l'influence du cache système.
+# Les E/S utilisent O_DIRECT afin de limiter l'influence du cache
+# système. Si O_DIRECT n'est pas disponible, le test est FAIL.
 #
 # PASS si :
 #   - aucune erreur d'intégrité ou d'E/S ;
@@ -83,7 +82,7 @@ DEV_MODE = True
 
 # Condition d'arrêt du test : "duration" (durée fixe) ou "cycles"
 # (nombre de cycles écriture+lecture complets).
-TEST_LIMIT_MODE = "cycles"
+TEST_LIMIT_MODE = "duration"
 
 TEST_DURATION_MIN = .5      # utilisé si TEST_LIMIT_MODE == "duration"
 TEST_CYCLES = 2            # utilisé si TEST_LIMIT_MODE == "cycles"
@@ -118,7 +117,6 @@ TXT_FAIL = "FAIL"
 TXT_DO_NOT_UNPLUG = "Ne pas débrancher svp"
 TXT_REMOVE = "Retirer la clé"
 TXT_READY = "Clé détectée"
-TXT_PRESS_START = "Vérifiez le périphérique puis appuyez sur START"
 TXT_TOO_MANY = "Plusieurs clés branchées : ne laisser que la clé à tester"
 TXT_START = "START"
 TXT_INTERRUPT = "TEST INTERROMPU"
@@ -742,7 +740,7 @@ class TestWorker(QThread):
         csv_handle = open(result["csv"], "w", newline="", encoding="utf-8")
         writer = csv.writer(csv_handle)
         writer.writerow(["Cycle", "Operation", "Block", "Relative_Time_s",
-                         "MB/s", "Integrity", "Errors"])
+                         "MB/s", "Integrity"])
 
         global_start = time.perf_counter()
 
@@ -947,7 +945,6 @@ class TestWorker(QThread):
                     rel,
                     mbps,
                     1,
-                    0,
                 ])
 
                 self.sample.emit("WRITE", rel, mbps)
@@ -995,7 +992,7 @@ class TestWorker(QThread):
                 t1 = time.perf_counter_ns()
 
                 if n == 0:
-                    break
+                        raise OSError(f"Lecture interrompue au bloc {block_number}")
 
                 duration = (t1 - t0) / 1e9
                 mbps = calculate_mbps(n, duration)
@@ -1023,7 +1020,6 @@ class TestWorker(QThread):
                     rel,
                     mbps,
                     integrity,
-                    total_errors,
                 ])
 
                 self.sample.emit("READ", rel, mbps)
@@ -1044,7 +1040,7 @@ class TestWorker(QThread):
 # GUI
 # ============================================================
 
-WAITING_INSERT, READY, TESTING, WAITING_REMOVAL, WAITING_CONTINUE = range(5)
+WAITING_INSERT, READY, TESTING, WAITING_REMOVAL, WAITING_RESTART = range(5)
 
 COLORS = {
     "wait": "#1f4e79",
@@ -1053,6 +1049,11 @@ COLORS = {
     "fail": "#b02a37",
 }
 
+SIZE_TXT_BANNER = 44
+SIZE_TXT_STATUS = 11
+SIZE_TXT_DEV_STATUS = 10
+SIZE_TXT_BUTTON = 16
+SIZE_TXT_INFO = 9
 
 class MainWindow(QMainWindow):
 
@@ -1060,9 +1061,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Test flash drive")
         if DEV_MODE:
-            self.resize(1300, 850)
+            self.setWindowState(self.windowState() | Qt.WindowMaximized)
         else:
-            self.resize(900, 500)
+            self.resize(550, 300)
 
         self.state = WAITING_INSERT
         self.usb_devnodes = []
@@ -1097,14 +1098,14 @@ class MainWindow(QMainWindow):
         self.banner = QLabel()
         self.banner.setAlignment(Qt.AlignCenter)
         if DEV_MODE:
-            self.banner.setMinimumHeight(130)
+            self.banner.setMinimumHeight(SIZE_TXT_BANNER + 20)
             root.addWidget(self.banner)
         else:
-            self.banner.setMinimumHeight(200)
+            self.banner.setMinimumHeight(SIZE_TXT_BANNER + 20)
             root.addWidget(self.banner, 1)      # la bannière remplit la fenêtre
 
         self.status_label = QLabel("")
-        self.status_label.setFont(QFont("Sans", 11 if DEV_MODE else 20))
+        self.status_label.setFont(QFont("Sans", SIZE_TXT_STATUS))
         self.status_label.setAlignment(Qt.AlignCenter)
         root.addWidget(self.status_label)
 
@@ -1112,8 +1113,8 @@ class MainWindow(QMainWindow):
 
         self.start_button = QPushButton(TXT_START)
         self.start_button.setFont(
-            QFont("Sans", 16 if DEV_MODE else 28, QFont.Bold))
-        self.start_button.setMinimumHeight(60 if DEV_MODE else 110)
+            QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
+        self.start_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
         self.start_button.setStyleSheet(
             "QPushButton{background-color:#1e7e34;color:white;"
             "border-radius:10px;}"
@@ -1122,12 +1123,12 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.on_start_clicked)
         root.addWidget(self.start_button)
 
-        self.continue_button = QPushButton("CONTINUE")
-        self.continue_button.setFont(QFont("Sans", 16 if DEV_MODE else 28, QFont.Bold))
-        self.continue_button.setMinimumHeight(60 if DEV_MODE else 110)
-        self.continue_button.clicked.connect(self.on_continue_clicked)
-        self.continue_button.hide()
-        root.addWidget(self.continue_button)
+        self.restart_button = QPushButton("RESTART")
+        self.restart_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
+        self.restart_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
+        self.restart_button.clicked.connect(self.on_restart_clicked)
+        self.restart_button.hide()
+        root.addWidget(self.restart_button)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -1136,12 +1137,12 @@ class MainWindow(QMainWindow):
         # Toujours créés (les slots y écrivent), ajoutés à la fenêtre
         # seulement en mode développement.
         self.dev_status_label = QLabel("")
-        self.dev_status_label.setFont(QFont("Sans", 10))
+        self.dev_status_label.setFont(QFont("Sans", SIZE_TXT_DEV_STATUS))
         self.dev_status_label.setAlignment(Qt.AlignCenter)
 
         self.info_text = QPlainTextEdit()
         self.info_text.setReadOnly(True)
-        self.info_text.setFont(QFont("Monospace", 9))
+        self.info_text.setFont(QFont("Monospace", SIZE_TXT_INFO))
         self.info_text.setLineWrapMode(QPlainTextEdit.NoWrap)
 
         self.figure = Figure(figsize=(8, 5))
@@ -1161,7 +1162,7 @@ class MainWindow(QMainWindow):
             root.addWidget(splitter, 1)
 
     def _set_banner(self, title, color):
-        size = 44 if DEV_MODE else 96
+        size = SIZE_TXT_BANNER
         self.banner.setText(
             f"<div style='font-size:{size}px;font-weight:bold'>{title}</div>"
         )
@@ -1296,7 +1297,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self._set_banner(TXT_READY, COLORS["wait"])
         if single:
-            self._set_user_status(f"{label}\n{TXT_PRESS_START}")
+            self._set_user_status(label)
         else:
             others = ", ".join(self.usb_devnodes)
             self._set_user_status(f"{TXT_TOO_MANY}\n({others})")
@@ -1309,7 +1310,7 @@ class MainWindow(QMainWindow):
         self.current_devnode = None
         self._ready_snapshot = None
         self.start_button.setEnabled(False)
-        self.continue_button.hide()
+        self.restart_button.hide()
         self.progress.setValue(0)
         self._set_banner(TXT_INSERT, COLORS["wait"])
         self._set_user_status("")
@@ -1326,11 +1327,11 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_test(self.current_devnode)
 
-    def on_continue_clicked(self):
-        if self.state != WAITING_CONTINUE:
+    def on_restart_clicked(self):
+        if self.state != WAITING_RESTART:
             return
 
-        self.continue_button.hide()
+        self.restart_button.hide()
         self._go_waiting_insert()
 
     # ---------------- Test ----------------
@@ -1338,7 +1339,7 @@ class MainWindow(QMainWindow):
     def start_test(self, devnode):
         self.state = TESTING
         self.current_devnode = devnode
-        self.continue_button.hide()
+        self.restart_button.hide()
         self._reset_series()
         self._init_axes()
         self._render_info("")
@@ -1410,14 +1411,14 @@ class MainWindow(QMainWindow):
         self._write_pdf(r)
 
         if not r.get("completed", False):
-            self.state = WAITING_CONTINUE
+            self.state = WAITING_RESTART
             self._set_banner(TXT_INTERRUPT, COLORS["fail"])
             self._set_user_status("")
-            self.continue_button.show()
+            self.restart_button.show()
             return
 
         self.state = WAITING_REMOVAL
-        self.continue_button.hide()
+        self.restart_button.hide()
         self._set_banner(TXT_PASS if passed else TXT_FAIL, COLORS["pass"] if passed else COLORS["fail"])
         self._set_user_status(TXT_REMOVE)
 
