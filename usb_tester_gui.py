@@ -82,7 +82,7 @@ DEV_MODE = True
 
 # Condition d'arrêt du test : "duration" (durée fixe) ou "cycles"
 # (nombre de cycles écriture+lecture complets).
-TEST_LIMIT_MODE = "duration"
+TEST_LIMIT_MODE = "cycles"
 
 TEST_DURATION_MIN = .5      # utilisé si TEST_LIMIT_MODE == "duration"
 TEST_CYCLES = 2            # utilisé si TEST_LIMIT_MODE == "cycles"
@@ -535,39 +535,84 @@ def format_device(devnode, fs_type, label=""):
 
     cfg = FS_CONFIG[fs_type]
 
-    if not shutil.which(cfg["tool"]):
+    # Vérification des dépendances
+    for tool in (cfg["tool"], "wipefs", "sfdisk", "partprobe", "blkid"):
+        if not shutil.which(tool):
+            raise RuntimeError(f"Outil introuvable : {tool}")
+
+    def execute(cmd, timeout=30, input_text=None):
+        out, err, rc = run(cmd, timeout=timeout, input_text=input_text)
+        if rc != 0:
+            raise RuntimeError(
+                f"Commande échouée : {' '.join(cmd)}\n{err or out}"
+            )
+        return out
+
+    # 1. Supprimer les anciennes signatures
+    execute(["wipefs", "-a", devnode])
+
+    # 2. Créer une table MBR et une partition primaire
+    partition_type = {
+        "fat32": "c",
+        "exfat": "7",
+        "ntfs": "7",
+    }[fs_type]
+
+    script = (
+        "label: dos\n"
+        "start=2048, type=" + partition_type + "\n"
+    )
+
+    execute(
+        ["sfdisk", "--wipe", "always", devnode],
+        input_text=script,
+    )
+
+    # 3. Actualiser la table de partitions
+    execute(["partprobe", devnode])
+    execute(["udevadm", "settle"], timeout=15)
+
+    # 4. Identifier la première partition
+    out = execute([
+        "lsblk", "-ln", "-o", "PATH,TYPE", devnode
+    ])
+
+    partitions = [
+        line.split()[0]
+        for line in out.splitlines()
+        if len(line.split()) == 2 and line.split()[1] == "part"
+    ]
+
+    if len(partitions) != 1:
         raise RuntimeError(
-            f"{cfg['tool']} introuvable "
-            f"(installer le paquet {cfg['package']})."
+            f"Partition unique non détectée sur {devnode}"
         )
 
-    unmount_all_partitions(devnode)
+    partition = partitions[0]
 
+    # 5. Formater la partition
     cmd = [cfg["tool"], *cfg["args"]]
 
     if label:
         cmd += [cfg["label_arg"], label]
 
-    cmd.append(devnode)
+    cmd.append(partition)
 
-    out, err, rc = run(cmd, timeout=120)
+    execute(cmd, timeout=120)
 
-    if rc != 0:
-        raise RuntimeError(err or out or f"Reformatage {fs_type} échoué")
+    # 6. Synchroniser les écritures
+    execute(["sync"], timeout=60)
 
-    run(["udevadm", "settle"], timeout=10)
+    # 7. Vérifier le système de fichiers
+    detected = execute([
+        "blkid", "-p", "-o", "value", "-s", "TYPE", partition
+    ]).strip().lower()
 
-    out, err, rc = run(
-        ["blkid", "-o", "value", "-s", "TYPE", devnode],
-        timeout=10,
-    )
-
-    detected = out.strip().lower()
-
-    if rc != 0 or detected != cfg["blkid"]:
+    if detected != cfg["blkid"]:
         raise RuntimeError(
             f"{fs_type.upper()} non détecté après reformatage "
-            f"(blkid : {detected or 'inconnu'}, attendu : {cfg['blkid']})"
+            f"(blkid : {detected or 'inconnu'}, "
+            f"attendu : {cfg['blkid']})"
         )
 
 # ============================================================
