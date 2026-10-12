@@ -46,6 +46,7 @@ import csv
 import json
 import time
 import mmap
+import errno
 import shutil
 import hashlib
 import subprocess
@@ -246,6 +247,104 @@ def create_result_paths(devnode, serial):
     }
 
 # ============================================================
+# GESTION CENTRALISÉE DES ERREURS
+# ============================================================
+
+def classify_error(exc, operation=""):
+    """
+    Convertit une exception Python ou système en erreur structurée.
+
+    Retourne :
+        code    : identifiant stable pour le programme
+        message : description destinée au rapport
+        detail  : exception originale pour le diagnostic
+    """
+
+    code = "UNEXPECTED_ERROR"
+    message = "Erreur inattendue"
+
+    if isinstance(exc, OSError):
+
+        error_map = {
+            errno.ENOENT: (
+                "FILE_NOT_FOUND",
+                "Fichier ou périphérique introuvable"
+            ),
+            errno.EIO: (
+                "IO_ERROR",
+                "Erreur d'entrée/sortie"
+            ),
+            errno.ENODEV: (
+                "DEVICE_UNAVAILABLE",
+                "Périphérique indisponible"
+            ),
+            errno.ENXIO: (
+                "DEVICE_UNAVAILABLE",
+                "Périphérique ou adresse indisponible"
+            ),
+            errno.ETIMEDOUT: (
+                "IO_TIMEOUT",
+                "Délai d'entrée/sortie dépassé"
+            ),
+            errno.EACCES: (
+                "PERMISSION_DENIED",
+                "Accès refusé"
+            ),
+            errno.EBUSY: (
+                "DEVICE_BUSY",
+                "Périphérique occupé"
+            ),
+            errno.ENOSPC: (
+                "NO_SPACE",
+                "Espace disponible insuffisant"
+            ),
+            errno.EINVAL: (
+                "INVALID_ARGUMENT",
+                "Argument invalide"
+            ),
+        }
+
+        code, message = error_map.get(
+            exc.errno,
+            ("OS_ERROR", "Erreur système")
+        )
+
+    elif isinstance(exc, ValueError):
+        code = "INVALID_VALUE"
+        message = "Valeur invalide"
+
+    elif isinstance(exc, subprocess.TimeoutExpired):
+        code = "COMMAND_TIMEOUT"
+        message = "Délai d'exécution de la commande dépassé"
+
+    elif isinstance(exc, RuntimeError):
+        code = "RUNTIME_ERROR"
+        message = str(exc)
+
+    if operation:
+        message = f"{operation} : {message}"
+
+    return {
+        "code": code,
+        "message": message,
+        "detail": f"{type(exc).__name__}: {exc}",
+    }
+
+def set_result_error(result, exc, operation=""):
+    """
+    Enregistre une exception dans le dictionnaire de résultat.
+    """
+
+    error = classify_error(exc, operation)
+
+    result["error"] = error["message"]
+    result["error_code"] = error["code"]
+    result["error_detail"] = error["detail"]
+
+    result["result"] = "FAIL"
+    result["completed"] = False
+
+# ============================================================
 # DÉTECTION USB (pyudev)
 # ============================================================
 
@@ -407,7 +506,7 @@ def get_fail_reasons(result):
     reasons = []
 
     if result.get("error"):
-        reasons.append(result["error"])
+        reasons.extend(result["error"].splitlines())
 
     if result["errors"]:
         reasons.append(f"{result['errors']} erreur(s) d'intégrité")
@@ -422,7 +521,10 @@ def get_fail_reasons(result):
             reasons.append("Lecture trop rapide")
 
     if not reasons:
-        reasons.append("Test incomplet ou interrompu")
+        if result.get("reformat", "").startswith("ÉCHEC"):
+            reasons.append("Échec du reformatage (voir section REFORMATAGE)")
+        else:
+            reasons.append("Test incomplet ou interrompu")
 
     return reasons
 
@@ -431,42 +533,55 @@ def build_report(info, result):
     lines = [
         format_device_info(info),
         "",
-        "=== RÉSULTATS ===",
-        f"{'Erreurs intégrité':<18}: {result['errors']}",
+        "=== PERFORMANCES ===",
+        "",
     ]
 
-    if result.get("error"):
-        lines.append(f"{'Message':<18}: {result['error']}")
-
-    lines.append("")
-
+    # ---------------- Performances ----------------
     for label, avg, stats in (
         ("Écriture", result["avg_write"], result["write_stats"]),
         ("Lecture", result["avg_read"], result["read_stats"]),
     ):
         lines.append(label)
-        lines.append(f"  {'Moyenne globale':<16}: {avg:8.2f} MB/s")
+
+        if stats["n"] > 0:
+            lines.append(f"  {'Moyenne globale':<18}: {avg:8.2f} MB/s")
+        else:
+            lines.append(f"  {'Moyenne globale':<18}: N/A")
 
         if stats["n"] >= 2:
             lines.append(
-                f"  {'Std (par cycle)':<16}: "
-                f"{stats['std']:8.2f} MB/s   "
+                f"  {'Std (par cycle)':<18}: "
+                f"{stats['std']:8.2f} MB/s "
                 f"(n = {stats['n']} cycles)"
             )
 
             cv = f"{stats['cv']:8.2f} %" if stats["cv"] is not None else "N/A"
-            lines.append(f"  {'CV (par cycle)':<16}: {cv}")
+            lines.append(f"  {'CV (par cycle)':<18}: {cv}")
         else:
             lines.append(
-                f"  {'Std / CV':<16}: "
-                "N/A (moins de 2 cycles mesurés)"
+                f"  {'Std / CV':<18}: N/A (moins de 2 cycles mesurés)"
             )
 
+        lines.append("")
+
+    # ---------------- Intégrité ----------------
     lines.extend([
+        "=== INTÉGRITÉ ===",
+        f"{'Erreurs intégrité':<20}: "
+        f"{result['errors'] if result['read_stats']['n'] > 0 else 'N/A'}",
         "",
+    ])
+
+    # ---------------- Reformatage ----------------
+    lines.extend([
         "=== REFORMATAGE ===",
-        result["reformat"],
+        result.get("reformat", "N/A"),
         "",
+    ])
+
+    # ---------------- Résultat final ----------------
+    lines.extend([
         "================= RÉSULTAT FINAL =================",
         "",
     ])
@@ -474,9 +589,8 @@ def build_report(info, result):
     if result["result"] == "PASS":
         lines.append("PASS")
     else:
-        reasons = get_fail_reasons(result)
         lines.append("FAIL")
-        lines.extend(f"- {reason}" for reason in reasons)
+        lines.extend(f"- {reason}" for reason in get_fail_reasons(result))
 
     lines.extend([
         "",
@@ -649,6 +763,7 @@ def open_direct_device(devnode, mode):
 class UsbWatcher(QThread):
 
     drives_changed = pyqtSignal(list)
+    usb_removed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -665,19 +780,24 @@ class UsbWatcher(QThread):
 
         self.drives_changed.emit(scan_usb_candidates())
 
+        last_scan = time.monotonic()
+        scan_pending = False
+
         while not self._stop_requested:
-            device = monitor.poll(timeout=0.5)
+            device = monitor.poll(timeout=0.1)
 
-            if device is None:
-                continue
+            if device is not None:
 
-            if device.action in ("add", "remove", "change"):
-                self.msleep(800)
+                if device.action == "remove" and device.device_type == "disk":
+                    self.usb_removed.emit(device.device_node or "")
 
-                if self._stop_requested:
-                    break
+                if device.action in ("add", "remove", "change"):
+                    scan_pending = True
 
+            if scan_pending and time.monotonic() - last_scan >= 0.8:
                 self.drives_changed.emit(scan_usb_candidates())
+                last_scan = time.monotonic()
+                scan_pending = False
 
 # ============================================================
 # THREAD : TEST
@@ -698,6 +818,8 @@ def new_result(devnode):
         "read_stats": speed_stats([]),
         "errors": 0, 
         "error": "",
+        "error_code": "",
+        "error_detail": "",
         "result": "FAIL", 
         "reformat": "",
         "completed": False,
@@ -717,8 +839,12 @@ class TestWorker(QThread):
         self.devnode = devnode
         self._abort = False
         self._last_info = ""
+        self._abort_reason = "Test interrompu"
+        self.device_info = None
+        self.current_result = None
 
-    def abort(self):
+    def abort(self, reason="Test interrompu"):
+        self._abort_reason = reason
         self._abort = True
 
     def _emit_info(self, text):
@@ -726,11 +852,33 @@ class TestWorker(QThread):
         self.info_ready.emit(text)
 
     def run(self):
+
         try:
             result = self._run_test()
+
         except Exception as e:
-            result = new_result(self.devnode)
-            result["error"] = str(e)
+
+            # Récupérer les résultats déjà enregistrés.
+            result = self.current_result
+
+            if result is None:
+                result = new_result(self.devnode)
+
+            set_result_error(result, e, "Test")
+
+            result["reformat"] = "NON EFFECTUÉ (test interrompu)"
+
+            if self._abort:
+                result["error"] = self._abort_reason
+
+            # Utiliser les informations mémorisées.
+            info = self.device_info
+
+            if info is None:
+                info = get_device_info(self.devnode)
+
+            result["report"] = build_report(info, result)
+            self._emit_info(result["report"])
 
         self.test_done.emit(result)
 
@@ -742,8 +890,10 @@ class TestWorker(QThread):
         # ---------------- Infos périphérique ----------------
         self.status.emit("Lecture des informations du périphérique...")
         info = get_device_info(devnode)
+        self.device_info = info.copy()
 
         result = new_result(devnode)
+        self.current_result = result
         result["model"] = info["Model"]
         result["serial"] = info["Serial"]
 
@@ -849,7 +999,7 @@ class TestWorker(QThread):
 
                 except Exception as e:
                     io_failed = True
-                    result["error"] = f"Erreur écriture : {e}"
+                    set_result_error(result, e, "Écriture")
 
                 if io_failed or self._abort:
                     break
@@ -883,7 +1033,7 @@ class TestWorker(QThread):
 
                 except Exception as e:
                     io_failed = True
-                    result["error"] = f"Erreur lecture : {e}"
+                    set_result_error(result, e, "Lecture")
 
         finally:
             csv_handle.close()
@@ -915,12 +1065,26 @@ class TestWorker(QThread):
                 and MIN_READ_MBPS < avg_read < MAX_READ_MBPS
             ) else "FAIL",
         })
-        if self._abort and not result["error"]:
-            result["error"] = "Test interrompu"
+        if self._abort:
+            result["error"] = self._abort_reason
         if not direct_ok and not result["error"]:
             result["error"] = ("O_DIRECT non supporté "
                                "(résultats via cache, à relativiser)")
 
+        if self._abort or io_failed:
+
+            result["result"] = "FAIL"
+            result["completed"] = False
+
+            if self._abort:
+                result["error"] = self._abort_reason
+
+            result["reformat"] = "NON EFFECTUÉ (test interrompu)"
+
+            result["report"] = build_report(info, result)
+            self._emit_info(result["report"])
+
+            return result
 
         # ---------------- Reformatage ----------------
         self.status.emit(f"Reformatage en {REFORMAT_FS.upper()}...")
@@ -931,10 +1095,13 @@ class TestWorker(QThread):
                             "et vérifié.")
             reformat_ok = True
         except Exception as e:
-            reformat_msg = f"ÉCHEC : {e}"
-            msg = f"Reformatage échoué : {e}"
-            result["error"] = (f"{result['error']} ; {msg}"
-                               if result["error"] else msg)
+
+            error = classify_error(e, "Reformatage")
+
+            result["error_code"] = error["code"]
+            result["error_detail"] = error["detail"]
+
+            reformat_msg = f"ÉCHEC : {error['message']}"
 
         # PASS seulement si la clé est reformatée, vérifiée et utilisable
         if not reformat_ok or not direct_ok:
@@ -1117,8 +1284,6 @@ class MainWindow(QMainWindow):
         self.current_devnode = None
         self.worker = None
         self.graph_dirty = False
-        self.history = []          # lignes d'historique (plus récent d'abord)
-        self.current_info = ""     # texte du test courant (zone de gauche)
         self._ready_snapshot = None
 
         self._reset_series()
@@ -1132,6 +1297,7 @@ class MainWindow(QMainWindow):
 
         self.watcher = UsbWatcher()
         self.watcher.drives_changed.connect(self.on_drives_changed)
+        self.watcher.usb_removed.connect(self.on_usb_removed)
         self.watcher.start()
 
     # ---------------- UI ----------------
@@ -1170,7 +1336,7 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.on_start_clicked)
         root.addWidget(self.start_button)
 
-        self.restart_button = QPushButton("RESTART")
+        self.restart_button = QPushButton("NOUVEAU TEST")
         self.restart_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
         self.restart_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
         self.restart_button.clicked.connect(self.on_restart_clicked)
@@ -1228,27 +1394,9 @@ class MainWindow(QMainWindow):
     # ---------------- Zone de texte (gauche) ----------------
 
     def _render_info(self, text):
-        """Texte du test courant + historique de la session."""
+        """Affiche les informations du test courant."""
         self.current_info = text
-        parts = [text.rstrip()] if text else []
-        if self.history:
-            if parts:
-                parts.append("")
-            parts.append("=== HISTORIQUE (session) ===")
-            parts.append(
-                f"{'Heure':<10}{'Device':<11}{'Modèle':<20}{'Serial':<20}"
-                f"{'Écr MB/s':>10} {'Lect MB/s':>10} {'Err':>5}  Résultat")
-            parts.extend(self.history)
-        self.info_text.setPlainText("\n".join(parts))
-
-    def _add_history(self, r):
-        line = (
-            f"{datetime.now():%H:%M:%S}  {r['devnode']:<11}"
-            f"{str(r['model'])[:19]:<20}{str(r['serial']):<20}"
-            f"{r['avg_write']:>10.2f} {r['avg_read']:>10.2f} "
-            f"{r['errors']:>5}  {r['result']}"
-        )
-        self.history.insert(0, line)
+        self.info_text.setPlainText(text)
 
     # ---------------- Graphe ----------------
 
@@ -1318,6 +1466,18 @@ class MainWindow(QMainWindow):
         elif self.state == WAITING_REMOVAL:
             if self.current_devnode not in self.usb_devnodes:
                 self._go_waiting_insert()
+
+    def on_usb_removed(self, devnode):
+        """Interrompt le test si la clé en cours de test est déconnectée."""
+
+        if self.state != TESTING:
+            return
+
+        if devnode != self.current_devnode:
+            return
+
+        if self.worker is not None:
+            self.worker.abort("Déconnexion USB détectée")
 
     def _device_label(self, info):
         """Ex: '/dev/sdb - SanDisk Ultra Fit - 31.95 GB'."""
@@ -1443,8 +1603,7 @@ class MainWindow(QMainWindow):
 
         passed = r["result"] == "PASS"
 
-        # Zone de texte : rapport complet + historique
-        self._add_history(r)
+        # Zone de texte : rapport complet
         self._render_info(r.get("report") or self.current_info)
 
         # Le PDF est écrit AVANT la bannière : on laisse d'abord la boucle
