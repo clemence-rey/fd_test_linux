@@ -374,6 +374,31 @@ def scan_usb_candidates():
 
     return sorted(set(candidates))
 
+def get_diskseq(devnode):
+    """Identifie une instance de disque, indépendamment de /dev/sdX."""
+    try:
+        device = pyudev.Devices.from_device_file(
+            pyudev.Context(), devnode
+        )
+        return int(device.properties["DISKSEQ"])
+
+    except (KeyError, ValueError, OSError, pyudev.DeviceNotFoundError) as exc:
+        raise RuntimeError(
+            f"Impossible d'identifier le périphérique {devnode}"
+        ) from exc
+
+
+def assert_same_device(devnode, expected_diskseq):
+    """Refuse de poursuivre si le disque a été remplacé."""
+    current_diskseq = get_diskseq(devnode)
+
+    if current_diskseq != expected_diskseq:
+        raise RuntimeError(
+            f"Périphérique remplacé sur {devnode} : "
+            f"DISKSEQ attendu={expected_diskseq}, "
+            f"actuel={current_diskseq}"
+        )
+
 # ============================================================
 # INFOS PÉRIPHÉRIQUE
 # ============================================================
@@ -470,11 +495,58 @@ def get_device_size(devnode):
         os.close(fd)
 
 
-def unmount_all_partitions(disk_devnode):
-    """Démonte le disque et toutes ses partitions."""
-    out, _, _ = run(["lsblk", "-ln", "-o", "NAME", disk_devnode])
-    for name in out.split():
-        run(["umount", f"/dev/{name}"])
+def unmount_all_partitions(devnode, expected_diskseq):
+    """Démonte toutes les partitions du disque et vérifie le résultat."""
+
+    import json
+
+    def get_mounts():
+        assert_same_device(devnode, expected_diskseq)
+
+        out, err, rc = run([
+            "lsblk", "-J", "-p",
+            "-o", "PATH,TYPE,MOUNTPOINT",
+            devnode
+        ])
+
+        if rc != 0:
+            raise RuntimeError(
+                f"Impossible de lire les partitions : {err or out}"
+            )
+
+        devices = json.loads(out)["blockdevices"]
+        mounts = []
+
+        def collect(device):
+            if device.get("mountpoint"):
+                mounts.append(device["path"])
+
+            for child in device.get("children", []):
+                collect(child)
+
+        for device in devices:
+            collect(device)
+
+        return mounts
+
+    # Démonter les systèmes de fichiers actuellement montés.
+    for partition in reversed(get_mounts()):
+        assert_same_device(devnode, expected_diskseq)
+
+        out, err, rc = run(["umount", partition])
+
+        if rc != 0:
+            raise RuntimeError(
+                f"Impossible de démonter {partition} : {err or out}"
+            )
+
+    # Vérification finale.
+    remaining = get_mounts()
+
+    if remaining:
+        raise RuntimeError(
+            "Partitions encore montées : " + ", ".join(remaining)
+        )
 
 
 # ============================================================
@@ -641,7 +713,10 @@ FS_CONFIG = {
         },
     }
 
-def format_device(devnode, fs_type, label=""):
+def do_format_device(devnode, fs_type, label="", expected_diskseq=None):
+    if expected_diskseq is None:
+        raise RuntimeError("Reformatage interdit : DISKSEQ non fourni")
+
     fs_type = fs_type.lower().strip()
 
     if fs_type not in FS_CONFIG:
@@ -655,11 +730,20 @@ def format_device(devnode, fs_type, label=""):
             raise RuntimeError(f"Outil introuvable : {tool}")
 
     def execute(cmd, timeout=30, input_text=None):
-        out, err, rc = run(cmd, timeout=timeout, input_text=input_text)
+        # Vérifier que la clé sélectionnée est toujours présente.
+        assert_same_device(devnode, expected_diskseq)
+
+        out, err, rc = run(
+            cmd,
+            timeout=timeout,
+            input_text=input_text
+        )
+
         if rc != 0:
             raise RuntimeError(
                 f"Commande échouée : {' '.join(cmd)}\n{err or out}"
             )
+
         return out
 
     # 1. Supprimer les anciennes signatures
@@ -741,20 +825,34 @@ def make_aligned_buffer(size, fill=None):
     return buf
 
 
-def open_direct_device(devnode, mode):
-    if mode == "w":
-        base_flags = os.O_WRONLY | os.O_SYNC
-    else:
-        base_flags = os.O_RDONLY
+def open_test_device(devnode, expected_diskseq):
+    """Ouvre le disque pour les E/S et vérifie son identité."""
+    import fcntl
+    import struct
+
+    BLKGETDISKSEQ = 0x80081280
+
+    fd = os.open(
+        devnode,
+        os.O_RDWR | os.O_SYNC | os.O_DIRECT | os.O_EXCL
+    )
 
     try:
-        fd = os.open(str(devnode), base_flags | os.O_DIRECT)
-        return fd, True
-    except OSError as e:
-        if e.errno != 22:  # EINVAL : O_DIRECT non supporté ici
-            raise
-        fd = os.open(str(devnode), base_flags)
-        return fd, False
+        diskseq = struct.unpack(
+            "Q",
+            fcntl.ioctl(fd, BLKGETDISKSEQ, bytes(8))
+        )[0]
+
+        if diskseq != expected_diskseq:
+            raise RuntimeError(
+                "Le périphérique USB a changé avant son ouverture"
+            )
+
+        return fd
+
+    except Exception:
+        os.close(fd)
+        raise
 
 # ============================================================
 # THREAD : SURVEILLANCE USB
@@ -834,9 +932,11 @@ class TestWorker(QThread):
     progress = pyqtSignal(int)
     test_done = pyqtSignal(dict)
 
-    def __init__(self, devnode):
+    def __init__(self, devnode, expected_diskseq):
         super().__init__()
         self.devnode = devnode
+        self.expected_diskseq = expected_diskseq
+
         self._abort = False
         self._last_info = ""
         self._abort_reason = "Test interrompu"
@@ -885,6 +985,9 @@ class TestWorker(QThread):
     def _run_test(self):
 
         devnode = self.devnode
+
+        # Refuser de tester une clé différente de celle sélectionnée.
+        assert_same_device(devnode, self.expected_diskseq)
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
         # ---------------- Infos périphérique ----------------
@@ -903,17 +1006,15 @@ class TestWorker(QThread):
 
         # ---------------- Accès brut ----------------
         self.status.emit("Démontage / accès brut au périphérique...")
-        unmount_all_partitions(devnode)
+        unmount_all_partitions(devnode, self.expected_diskseq)
 
         try:
             device_size = get_device_size(devnode)
         except Exception as e:
-            result["error"] = f"Périphérique inaccessible : {e}"
-            return result
+            raise RuntimeError(f"Périphérique inaccessible : {e}") from e
 
         if device_size < FILE_SIZE * 1.1:
-            result["error"] = "Périphérique trop petit pour ce test"
-            return result
+            raise RuntimeError("Périphérique trop petit pour ce test")
 
         # ---------------- Données de référence ----------------
         reference_bytes = os.urandom(BLOCK_SIZE)
@@ -930,7 +1031,6 @@ class TestWorker(QThread):
         cycle = 0
         last_pct = -1
         io_failed = False
-        direct_ok = True
 
         csv_handle = open(result["csv"], "w", newline="", encoding="utf-8")
         writer = csv.writer(csv_handle)
@@ -963,7 +1063,11 @@ class TestWorker(QThread):
                 last_pct = pct
                 self.progress.emit(pct)
 
+        fd = None
+
         try:
+            fd = open_test_device(devnode, self.expected_diskseq)
+
             while (not reached_limit() and not self._abort
                    and not io_failed):
 
@@ -978,9 +1082,13 @@ class TestWorker(QThread):
                 # ================= WRITE =================
                 self.status.emit(f"Cycle {label_cycle} - ÉCRITURE")
 
+                # Revenir au début du disque avant chaque écriture.
+                os.lseek(fd, 0, os.SEEK_SET)
+
                 try:
-                    written, write_time, phase_direct = self._write_cycle(
-                        devnode,
+
+                    written, write_time = self._write_cycle(
+                        fd,
                         write_buffer,
                         cycle,
                         writer,
@@ -990,7 +1098,6 @@ class TestWorker(QThread):
 
                     total_written += written
                     write_io_time += write_time
-                    direct_ok &= phase_direct
 
                     if write_time > 0:
                         cycle_write_speeds.append(
@@ -1009,9 +1116,12 @@ class TestWorker(QThread):
                 # ================= READ =================
                 self.status.emit(f"Cycle {label_cycle} - LECTURE")
 
+                # Revenir au début du disque avant chaque lecture.
+                os.lseek(fd, 0, os.SEEK_SET)
+
                 try:
-                    read_bytes, read_time, read_errors, phase_direct = self._read_cycle(
-                        devnode,
+                    read_bytes, read_time, read_errors = self._read_cycle(
+                        fd,
                         read_buffer,
                         reference_hash,
                         cycle,
@@ -1024,7 +1134,6 @@ class TestWorker(QThread):
                     total_read += read_bytes
                     read_io_time += read_time
                     errors += read_errors
-                    direct_ok &= phase_direct
 
                     if read_time > 0:
                         cycle_read_speeds.append(
@@ -1036,6 +1145,9 @@ class TestWorker(QThread):
                     set_result_error(result, e, "Lecture")
 
         finally:
+            if fd is not None:
+                os.close(fd)
+
             csv_handle.close()
             write_buffer.close()
             read_buffer.close()
@@ -1067,9 +1179,6 @@ class TestWorker(QThread):
         })
         if self._abort:
             result["error"] = self._abort_reason
-        if not direct_ok and not result["error"]:
-            result["error"] = ("O_DIRECT non supporté "
-                               "(résultats via cache, à relativiser)")
 
         if self._abort or io_failed:
 
@@ -1090,21 +1199,16 @@ class TestWorker(QThread):
         self.status.emit(f"Reformatage en {REFORMAT_FS.upper()}...")
         reformat_ok = False
         try:
-            format_device(devnode, REFORMAT_FS, REFORMAT_LABEL)
+            do_format_device(devnode, REFORMAT_FS, REFORMAT_LABEL, self.expected_diskseq)
             reformat_msg = (f"OK - {devnode} reformaté en {REFORMAT_FS.upper()} "
                             "et vérifié.")
             reformat_ok = True
         except Exception as e:
-
-            error = classify_error(e, "Reformatage")
-
-            result["error_code"] = error["code"]
-            result["error_detail"] = error["detail"]
-
-            reformat_msg = f"ÉCHEC : {error['message']}"
+            set_result_error(result, e, "Reformatage")
+            reformat_msg = f"ÉCHEC : {result['error']}"
 
         # PASS seulement si la clé est reformatée, vérifiée et utilisable
-        if not reformat_ok or not direct_ok:
+        if not reformat_ok:
             result["result"] = "FAIL"
 
         result["reformat"] = reformat_msg
@@ -1118,7 +1222,7 @@ class TestWorker(QThread):
 
     def _write_cycle(
     self,
-    devnode,
+    fd,
     buffer,
     cycle,
     writer,
@@ -1127,60 +1231,54 @@ class TestWorker(QThread):
 ):
         bytes_done = 0
         io_time = 0.0
-        direct_ok = True
 
-        fd, direct_ok = open_direct_device(devnode, "w")
+        for block_number in range(NUMBER_BLOCKS):
+            if self._abort:
+                break
 
-        try:
-            for block_number in range(NUMBER_BLOCKS):
-                if self._abort:
-                    break
+            t0 = time.perf_counter_ns()
+            written = os.writev(fd, [buffer])
+            t1 = time.perf_counter_ns()
 
-                t0 = time.perf_counter_ns()
-                written = os.writev(fd, [buffer])
-                t1 = time.perf_counter_ns()
+            if written != BLOCK_SIZE:
+                raise OSError(
+                    f"Écriture partielle ({written} octets)"
+                )
 
-                if written != BLOCK_SIZE:
-                    raise OSError(
-                        f"Écriture partielle ({written} octets)"
-                    )
+            duration = (t1 - t0) / 1e9
+            mbps = calculate_mbps(written, duration)
+            rel = elapsed()
 
-                duration = (t1 - t0) / 1e9
-                mbps = calculate_mbps(written, duration)
-                rel = elapsed()
+            bytes_done += written
+            io_time += duration
 
-                bytes_done += written
-                io_time += duration
+            writer.writerow([
+                cycle,
+                "WRITE",
+                block_number,
+                rel,
+                mbps,
+                1,
+            ])
 
-                writer.writerow([
-                    cycle,
-                    "WRITE",
-                    block_number,
-                    rel,
-                    mbps,
-                    1,
-                ])
+            self.sample.emit("WRITE", rel, mbps)
+            emit_progress("write", block_number)
 
-                self.sample.emit("WRITE", rel, mbps)
-                emit_progress("write", block_number)
+            if (
+                TEST_LIMIT_MODE == "duration"
+                and elapsed() >= TEST_DURATION
+            ):
+                break
 
-                if (
-                    TEST_LIMIT_MODE == "duration"
-                    and elapsed() >= TEST_DURATION
-                ):
-                    break
+        os.fsync(fd)
 
-            os.fsync(fd)
 
-        finally:
-            os.close(fd)
-
-        return bytes_done, io_time, direct_ok
+        return bytes_done, io_time
     
 
     def _read_cycle(
         self,
-        devnode,
+        fd,
         buffer,
         reference_hash,
         cycle,
@@ -1193,65 +1291,60 @@ class TestWorker(QThread):
         io_time = 0.0
         errors_found = 0
 
-        fd, direct_ok = open_direct_device(devnode, "r")
+        for block_number in range(NUMBER_BLOCKS):
+            if self._abort:
+                break
 
-        try:
-            for block_number in range(NUMBER_BLOCKS):
-                if self._abort:
-                    break
+            # Mesure uniquement l'E/S.
+            t0 = time.perf_counter_ns()
+            n = os.readv(fd, [buffer])
+            t1 = time.perf_counter_ns()
 
-                # Mesure uniquement l'E/S.
-                t0 = time.perf_counter_ns()
-                n = os.readv(fd, [buffer])
-                t1 = time.perf_counter_ns()
+            if n == 0:
+                    raise OSError(f"Lecture interrompue au bloc {block_number}")
 
-                if n == 0:
-                        raise OSError(f"Lecture interrompue au bloc {block_number}")
+            duration = (t1 - t0) / 1e9
+            mbps = calculate_mbps(n, duration)
 
-                duration = (t1 - t0) / 1e9
-                mbps = calculate_mbps(n, duration)
+            bytes_done += n
+            io_time += duration
 
-                bytes_done += n
-                io_time += duration
+            # Contrôle d'intégrité hors chronométrage.
+            received = bytes(buffer[:n])
+            received_hash = hashlib.sha256(received).digest()
 
-                # Contrôle d'intégrité hors chronométrage.
-                received = bytes(buffer[:n])
-                received_hash = hashlib.sha256(received).digest()
+            if n != BLOCK_SIZE or received_hash != reference_hash:
+                errors_found += 1
+                integrity = 0
+            else:
+                integrity = 1
 
-                if n != BLOCK_SIZE or received_hash != reference_hash:
-                    errors_found += 1
-                    integrity = 0
-                else:
-                    integrity = 1
+            rel = elapsed()
+            total_errors = initial_errors + errors_found
 
-                rel = elapsed()
-                total_errors = initial_errors + errors_found
+            writer.writerow([
+                cycle,
+                "READ",
+                block_number,
+                rel,
+                mbps,
+                integrity,
+            ])
 
-                writer.writerow([
-                    cycle,
-                    "READ",
-                    block_number,
-                    rel,
-                    mbps,
-                    integrity,
-                ])
+            self.sample.emit("READ", rel, mbps)
+            emit_progress("read", block_number)
 
-                self.sample.emit("READ", rel, mbps)
-                emit_progress("read", block_number)
+            if (
+                TEST_LIMIT_MODE == "duration"
+                and elapsed() >= TEST_DURATION
+            ):
+                break
 
-                if (
-                    TEST_LIMIT_MODE == "duration"
-                    and elapsed() >= TEST_DURATION
-                ):
-                    break
 
-        finally:
-            os.close(fd)
-
-        return bytes_done, io_time, errors_found, direct_ok
+        return bytes_done, io_time, errors_found
 
 # ============================================================
-# GUI
+# Thread : GUI
 # ============================================================
 
 WAITING_INSERT, READY, TESTING, WAITING_REMOVAL, WAITING_RESTART = range(5)
@@ -1282,6 +1375,7 @@ class MainWindow(QMainWindow):
         self.state = WAITING_INSERT
         self.usb_devnodes = []
         self.current_devnode = None
+        self.current_diskseq = None
         self.worker = None
         self.graph_dirty = False
         self._ready_snapshot = None
@@ -1495,6 +1589,7 @@ class MainWindow(QMainWindow):
         """Clé détectée : on affiche le device et on attend START."""
         self.state = READY
         self.current_devnode = devnode
+        self.current_diskseq = get_diskseq(self.current_devnode)
         self._ready_snapshot = (devnode, tuple(self.usb_devnodes))
 
         info = get_device_info(devnode)
@@ -1554,7 +1649,12 @@ class MainWindow(QMainWindow):
         self._set_banner(TXT_TESTING, COLORS["test"])
         self._set_user_status(TXT_DO_NOT_UNPLUG)
 
-        self.worker = TestWorker(devnode)
+        if self.current_diskseq is None:
+            raise RuntimeError("Identité USB non initialisée")
+
+        assert_same_device(self.current_devnode, self.current_diskseq)
+
+        self.worker = TestWorker(self.current_devnode, get_diskseq(self.current_devnode))
 
         self.worker.status.connect(self._dev_status)
         self.worker.info_ready.connect(self._render_info)
