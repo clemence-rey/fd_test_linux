@@ -1,7 +1,6 @@
 """Interface graphique du testeur USB : affichage, suivi du test et rapports."""
 
 import numpy as np
-import logging
 from datetime import datetime
 
 from PyQt5.QtCore import Qt, QTimer
@@ -30,6 +29,11 @@ from config import (
     BLOCK_SIZE_MB,
     MIN_WRITE_MBPS,
     MIN_READ_MBPS,
+    TEMPLATE_PATH,
+    STATION_NAME,
+    SOFTWARE_VERSION,
+    TEST_DURATION,
+    REFORMAT_FS,
 )
 
 from controller import (
@@ -43,7 +47,7 @@ from model import (
     format_device_info,
     assert_same_device,
     assert_test_port,
-    write_pdf_report,
+    write_docx_report,
 )
 
 # ============================================================
@@ -471,18 +475,11 @@ class MainWindow(QMainWindow):
         self.ax.legend(loc="lower left")
         self.canvas.draw()
 
-        # Enregistrement du graphique PNG.
-        if r.get("graph"):
-            try:
-                self.figure.savefig(r["graph"], dpi=200)
-            except Exception:
-                logging.exception("Échec de l'enregistrement du graphique PNG")
-
         # Affichage du rapport complet.
         passed = r["result"] == "PASS"
         self._render_info(r.get("report") or self.current_info)
 
-        # Génération du PDF à la prochaine itération de la boucle Qt.
+        # Génération du docx à la prochaine itération de la boucle Qt.
         self._set_steps_status("Génération du rapport...")
         QTimer.singleShot(0, lambda: self._display_final_result(r, passed))
 
@@ -625,56 +622,58 @@ class MainWindow(QMainWindow):
     # --- Finalisation et génération des rapports ---
 
     def _display_final_result(self, r, passed):
-        """Génère le rapport et affiche le verdict final."""
+        """Enregistre le rapport et affiche le verdict final."""
 
-        self._write_pdf(r)
+        report_saved = self._write_docx(r)
+
         self.progress.setValue(100)
-
-        # Tous les tests terminent dans le même état.
         self.state = WAITING_RESTART
 
-        # Affichage du verdict.
         self._set_banner(
             TXT_PASS if passed else TXT_FAIL,
-            COLORS["pass"] if passed else COLORS["fail"]
+            COLORS["pass"] if passed else COLORS["fail"],
         )
 
-        # Instructions à l'opérateur.
-        self._set_user_status("")
+        if report_saved:
+            self._set_user_status("")
+        else:
+            self._set_user_status(
+                "ATTENTION : le rapport DOCX n'a pas été enregistré."
+            )
 
-        # Désactivation du démarrage et affichage du bouton Nouveau test.
         self.start_button.setEnabled(False)
         self.button_stack.setCurrentWidget(self.restart_button)
 
 
-    def _write_pdf(self, r):
-        """Enregistre le rapport PDF avec un graphique de dimensions fixes."""
+    def _write_docx(self, r):
+        """Enregistre le rapport DOCX contenant les résultats et le graphique."""
 
-        path = r.get("pdf") or str(
-            RESULTS_DIR / f"USB_report_{datetime.now():%Y%m%d_%H%M%S}.pdf"
+        path = r.get("docx") or str(
+            RESULTS_DIR / f"USB_report_{datetime.now():%Y%m%d_%H%M%S}.docx"
         )
 
-        original_size = self.figure.get_size_inches().copy()
-
         try:
-            RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-
-            # Dimensions fixes du graphique pour le rapport PDF.
-            self.figure.set_size_inches(8, 5, forward=False)
-            self.figure.tight_layout()
-
-            write_pdf_report(path, r.get("report", ""), self.figure)
-
-            self._set_steps_status(f"PDF enregistré : {path}")
+            write_docx_report(
+                template_path=TEMPLATE_PATH,
+                output_path=path,
+                report_text=r.get("report", ""),
+                figure=self.figure,
+                device=r.get("model", "N/A"),
+                serial=r.get("serial", "N/A"),
+                file_size=f"{TEST_FILE_SIZE_MB} MB",
+                block_size=f"{BLOCK_SIZE_MB} MB",
+                test_duration=f"{TEST_DURATION:g} s",
+                final_fs=REFORMAT_FS.upper(),
+                station=STATION_NAME,
+                soft_version=SOFTWARE_VERSION,
+            )
 
         except Exception as exc:
-            self._set_steps_status(f"PDF échoué : {exc}")
+            self._set_steps_status(f"Échec du rapport DOCX : {exc}")
+            return False
 
-        finally:
-            # Restauration des dimensions du graphique dans la GUI.
-            self.figure.set_size_inches(original_size, forward=False)
-            self.figure.tight_layout()
-            self.canvas.draw_idle()
+        self._set_steps_status(f"Rapport DOCX enregistré : {path}")
+        return True
 
 
     def closeEvent(self, event):

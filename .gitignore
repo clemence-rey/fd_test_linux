@@ -1,36 +1,21 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Ignorer tout à la racine
+/*
 
-# Virtual environments
-venv/
-.venv/
-env/
+# Autoriser le dossier usb_tester
+!usb_tester/
 
-# IDE
-.vscode/
-.idea/
+# Ignorer son contenu
+usb_tester/*
 
-# Logs
-*.log
+# Autoriser uniquement les fichiers Python à sa racine
+!usb_tester/*.py
 
-# Build
-build/
-dist/
-*.egg-info/
+# Autoriser README et requirements
+!usb_tester/README.md
+!usb_tester/requirements.txt
 
-# OS
-.DS_Store
-Thumbs.db
+# Conserver le .gitignore
+!/.gitignore
 
-# Test outputs
-results/
-USB_results/
-
-# Tools and binaries
-tools/
-
-# Archives
-archive/
+# Autoriser le template de rapport
+!/Pyhon/usb_tester/Report_Template.docx

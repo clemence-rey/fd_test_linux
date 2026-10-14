@@ -13,9 +13,11 @@ import struct
 import subprocess
 import numpy as np
 import pyudev
+from io import BytesIO
+from pathlib import Path
+from docx import Document
+from docx.shared import Inches
 from datetime import datetime
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_pdf import PdfPages
 from config import (USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, MIN_READ_MBPS, MAX_READ_MBPS)
 
 
@@ -495,9 +497,7 @@ def create_test_result(devnode):
         "devnode": devnode,
         "model": "N/A",
         "serial": "N/A",
-        "csv": "",
-        "graph": "",
-        "pdf": "",
+        "docx": "",
         "report": "",
         "avg_write": 0.0,
         "avg_read": 0.0,
@@ -572,10 +572,10 @@ def sanitize_filename(text):
                    for c in str(text))
 
 
-def create_result_paths(devnode, serial):
+def create_result_paths(serial):
     """Construit les chemins des rapports du test USB."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    tag = f"{stamp}_{sanitize_filename(os.path.basename(devnode))}_{sanitize_filename(serial)}"
+    tag = f"{stamp}_{sanitize_filename(serial)}"
 
     return {
         "csv": str(RESULTS_DIR / f"USB_test_{tag}.csv"),
@@ -704,26 +704,144 @@ def build_report(info, result):
     return "\n".join(lines)
 
 
-def write_pdf_report(path, text, figure=None, lines_per_page=85):
-    """Exporte le rapport textuel et son graphique au format PDF."""
-    lines = text.splitlines() or [""]
+def write_docx_report(
+    template_path,
+    output_path,
+    report_text,
+    figure,
+    *,
+    of_number=None,
+    sap=None,
+    device=None,
+    serial=None,
+    file_size=None,
+    block_size=None,
+    test_duration=None,
+    final_fs=None,
+    station="USB Tester",
+    soft_version="TBD",
+):
+    """Génère le rapport DOCX avec le texte et le graphique du test."""
 
-    with PdfPages(str(path)) as pdf:
-        for start in range(0, len(lines), lines_per_page):
-            chunk = "\n".join(lines[start:start + lines_per_page])
+    template_path = Path(template_path)
+    output_path = Path(output_path)
 
-            fig = Figure(figsize=(8.27, 11.69))
+    if not template_path.is_file():
+        raise FileNotFoundError(
+            f"Template DOCX introuvable : {template_path}"
+        )
 
-            fig.text(
-                0.05, 0.97, chunk,
-                va="top",
-                ha="left",
-                family="monospace",
-                fontsize=7,
+    doc = Document(str(template_path))
+
+    values = {
+        "{{OF}}": of_number or "Not assigned",
+        "{{SAP}}": sap or "Not assigned",
+        "{{DEV_NAME}}": device or "N/A",
+        "{{SERIAL}}": serial or "N/A",
+        "{{FILE_SIZE}}": file_size or "N/A",
+        "{{BLOCK_SIZE}}": block_size or "N/A",
+        "{{TEST_DURATION}}": test_duration or "N/A",
+        "{{FINAL_FS}}": final_fs or "N/A",
+        "{{STATION}}": station,
+        "{{SOFT_VERSION}}": soft_version,
+    }
+
+    found_text = False
+    found_graph = False
+
+    def replace_placeholder(paragraph, key, value):
+        """Remplace un placeholder en conservant les runs non concernés."""
+
+        # Cas courant : le placeholder est dans un seul run.
+        for run in paragraph.runs:
+            if key in run.text:
+                run.text = run.text.replace(key, str(value))
+                return True
+
+        # Cas où Word a réparti le placeholder sur plusieurs runs.
+        if key in paragraph.text:
+            paragraph.text = paragraph.text.replace(key, str(value))
+            return True
+
+        return False
+
+    def replace(paragraph):
+        nonlocal found_text, found_graph
+
+        if "{{RESULT_TEXT}}" in paragraph.text:
+            found_text = True
+            paragraph.clear()
+
+            for index, line in enumerate(str(report_text).splitlines()):
+                if index:
+                    paragraph.add_run().add_break()
+
+                paragraph.add_run(line)
+
+            return
+
+        if "{{RESULT_GRAPH}}" in paragraph.text:
+            found_graph = True
+            paragraph.clear()
+
+            image = BytesIO()
+
+            figure.savefig(
+                image,
+                format="png",
+                dpi=180,
+                bbox_inches="tight",
             )
 
-            pdf.savefig(fig)
+            image.seek(0)
 
-        if figure is not None:
-            pdf.savefig(figure)
+            paragraph.add_run().add_picture(
+                image,
+                width=Inches(5.8),
+            )
 
+            return
+
+        for key, value in values.items():
+            replace_placeholder(paragraph, key, value)
+
+    def process_table(table):
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    replace(paragraph)
+
+                for nested_table in cell.tables:
+                    process_table(nested_table)
+
+    for paragraph in doc.paragraphs:
+        replace(paragraph)
+
+    for table in doc.tables:
+        process_table(table)
+
+    if not found_text:
+        raise RuntimeError(
+            "Placeholder {{RESULT_TEXT}} introuvable dans le template"
+        )
+
+    if not found_graph:
+        raise RuntimeError(
+            "Placeholder {{RESULT_GRAPH}} introuvable dans le template"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Enregistrer d'abord dans un fichier temporaire.
+    temp_path = output_path.with_name(
+        output_path.stem + ".tmp.docx"
+    )
+
+    try:
+        doc.save(str(temp_path))
+        temp_path.replace(output_path)
+
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    return output_path

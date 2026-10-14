@@ -1,6 +1,5 @@
 """Surveillance USB et exécution des tests dans des threads Qt indépendants."""
 
-import csv
 import hashlib
 import os
 import time
@@ -282,7 +281,7 @@ class TestWorker(QThread):
         self.current_result = result
         result["model"] = info["Model"]
         result["serial"] = info["Serial"]
-        result.update(create_result_paths(devnode, info["Serial"]))
+        result.update(create_result_paths(info["Serial"]))
 
         self.info_ready.emit(format_device_info(info))
 
@@ -331,17 +330,6 @@ class TestWorker(QThread):
                 create_aligned_buffer(BLOCK_SIZE)
             )
 
-            # Fichier CSV contenant les mesures de chaque bloc.
-            csv_handle = stack.enter_context(
-                open(result["csv"], "w", newline="", encoding="utf-8")
-            )
-
-            writer = csv.writer(csv_handle)
-            writer.writerow([
-                "Cycle", "Operation", "Block",
-                "Relative_Time_s", "MB/s", "Integrity"
-            ])
-
             # Point de départ du chronométrage global.
             self._global_start = time.perf_counter()
 
@@ -383,7 +371,6 @@ class TestWorker(QThread):
                         fd,
                         write_buffer,
                         cycle,
-                        writer,
                         self._get_elapsed,
                         self._emit_progress,
                     )
@@ -424,7 +411,6 @@ class TestWorker(QThread):
                         read_buffer,
                         reference_hash,
                         cycle,
-                        writer,
                         self._get_elapsed,
                         self._emit_progress,
                     )
@@ -489,11 +475,10 @@ class TestWorker(QThread):
     # --- Exécution des cycles de mesure ---
 
     def _write_cycle(
-    self,
-    fd,
-    buffer,
+        self,
+        fd,
+        buffer,
         cycle,
-        writer,
         elapsed,
         emit_progress,
     ):
@@ -539,16 +524,6 @@ class TestWorker(QThread):
             mbps = compute_mbps(written, duration)
             rel = elapsed()
 
-            # ENREGISTREMENT DES MESURES
-            writer.writerow([
-                cycle,
-                "WRITE",
-                block_number,
-                rel,
-                mbps,
-                1,
-            ])
-
             self.sample.emit("WRITE", rel, mbps)
             emit_progress("write", block_number)
 
@@ -574,7 +549,6 @@ class TestWorker(QThread):
         buffer,
         reference_hash,
         cycle,
-        writer,
         elapsed,
         emit_progress,
     ):
@@ -634,15 +608,6 @@ class TestWorker(QThread):
 
             # ENREGISTREMENT DES MESURES
             rel = elapsed()
-
-            writer.writerow([
-                cycle,
-                "READ",
-                block_number,
-                rel,
-                mbps,
-                integrity,
-            ])
 
             self.sample.emit("READ", rel, mbps)
             emit_progress("read", block_number)
@@ -768,7 +733,7 @@ class TestWorker(QThread):
         self.status.emit("Annulation : nettoyage des fichiers...")
 
         # Supprimer uniquement les fichiers associés au test courant.
-        for key in ("csv", "graph", "pdf"):
+        for key in ("docx"):
             path = result.get(key)
 
             if path:
@@ -813,4 +778,5 @@ class TestWorker(QThread):
         result["report"] = build_report(info, result)
         self.info_ready.emit(result["report"])
         return result
+
 

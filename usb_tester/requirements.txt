@@ -1,0 +1,5 @@
+PyQt5==5.15.9
+pyudev
+numpy
+matplotlib
+python-docx
