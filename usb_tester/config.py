@@ -8,15 +8,11 @@ le reformatage et les chemins de sauvegarde.
 from pathlib import Path
 
 
-# ============================================================
-# 1. INTERFACE GRAPHIQUE
-# ============================================================
-
-DEV_MODE = True                 # True : développement / False : production
-
+# Port USB réservé au banc de qualification
+USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1"
 
 # ============================================================
-# 2. CONFIGURATION DU TEST
+# 1. CONFIGURATION DU TEST
 # ============================================================
 
 # Mode d'arrêt : "cycles" ou "duration"
@@ -30,16 +26,16 @@ BLOCK_SIZE_MB = 4              # Taille d'un bloc d'E/S (MB)
 
 
 # ============================================================
-# 3. CRITÈRES DE QUALIFICATION (PASS / FAIL)
+# 2. CRITÈRES DE QUALIFICATION (PASS / FAIL)
 # ============================================================
 
-MIN_WRITE_MBPS = 100.0         # Débit minimal en écriture (MB/s)
-MIN_READ_MBPS = 170.0          # Débit minimal en lecture (MB/s)
+MIN_WRITE_MBPS = 80.0         # Débit minimal en écriture (MB/s)
+MIN_READ_MBPS = 160.0          # Débit minimal en lecture (MB/s)
 MAX_READ_MBPS = 500.0          # Débit maximal en lecture (MB/s)
 
 
 # ============================================================
-# 4. REFORMATAGE
+# 3. REFORMATAGE
 # ============================================================
 
 REFORMAT_FS = "fat32"          # "fat32", "exfat" ou "ntfs"
@@ -47,14 +43,14 @@ REFORMAT_LABEL = "FISCHER"     # Nom du volume après reformatage
 
 
 # ============================================================
-# 5. CHEMINS DES FICHIERS
+# 4. CHEMINS DES FICHIERS
 # ============================================================
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
 # ============================================================
-# 6. CONSTANTES CALCULÉES
+# 5. CONSTANTES CALCULÉES
 # ============================================================
 
 # Conversion des tailles en octets

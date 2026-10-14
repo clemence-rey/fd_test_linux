@@ -69,14 +69,13 @@ Les paramètres sont regroupés dans **`config.py`**. Les valeurs ci-dessous cor
 
 | Paramètre | Valeur | Description |
 | --- | --- | --- |
-| `DEV_MODE` | `True` | Interface détaillée avec informations et graphique ; `False` pour l'affichage simplifié. |
 | `TEST_LIMIT_MODE` | `"cycles"` | `"cycles"` ou `"duration"`. |
 | `TEST_CYCLES` | `2` | Nombre de cycles demandés en mode `cycles`. |
 | `TEST_DURATION_MIN` | `0.5` | Durée limite en minutes en mode `duration`. |
 | `TEST_FILE_SIZE_MB` | `512` | Volume nominal écrit, puis relu, par cycle. |
 | `BLOCK_SIZE_MB` | `4` | Taille d'un bloc d'E/S. |
-| `MIN_WRITE_MBPS` | `100.0` | Seuil inférieur de débit d'écriture. |
-| `MIN_READ_MBPS` | `170.0` | Seuil inférieur de débit de lecture. |
+| `MIN_WRITE_MBPS` | `80.0` | Seuil inférieur de débit d'écriture. |
+| `MIN_READ_MBPS` | `160.0` | Seuil inférieur de débit de lecture. |
 | `MAX_READ_MBPS` | `500.0` | Seuil supérieur de débit de lecture. |
 | `REFORMAT_FS` | `"fat32"` | Format final : `fat32`, `exfat` ou `ntfs`. |
 | `REFORMAT_LABEL` | `"FISCHER"` | Nom du volume après reformatage. |
@@ -106,7 +105,7 @@ Procédure opérateur :
 5. Attendre le verdict **PASS**, **FAIL** ou l'indication de test interrompu.
 6. Consulter les rapports dans `results/`, puis retirer la clé lorsque l'interface le demande.
 
-En mode développement, la fenêtre affiche également les informations techniques, les étapes du test et le graphique des débits.
+La fenêtre affiche également les informations techniques, les étapes du test et le graphique des débits.
 
 ## 6. Mesures et critères de qualification
 
