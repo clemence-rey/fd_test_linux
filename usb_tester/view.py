@@ -223,6 +223,8 @@ class MainWindow(QMainWindow):
         self.current_diskseq = None
         self.connected_devnode = None
         self.connected_diskseq = None
+        self._device_removed = False
+        self._new_device_ready = False
         self.state = WAITING_INSERT
         self._waiting_for_removal = False
         self.current_info = ""
@@ -446,13 +448,26 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             return
 
-        # Si une clé est encore connectée, attendre son retrait.
-        self._waiting_for_removal = self.connected_devnode is not None
+        # Check whether a remove/add sequence occurred.
+        device_ready = (
+            self._new_device_ready
+            and self.connected_devnode is not None
+            and self.connected_diskseq is not None
+        )
 
+        devnode = self.connected_devnode
+        diskseq = self.connected_diskseq
+
+        # Reset the GUI and detection flags.
         self._go_waiting_insert()
 
-        if self._waiting_for_removal:
-            self._set_user_status("")
+        self._device_removed = False
+        self._new_device_ready = False
+
+        if device_ready:
+            self._go_ready(devnode, diskseq)
+        elif devnode is not None:
+            self._waiting_for_removal = True
 
     # --- Surveillance des périphériques USB ---
 
@@ -482,6 +497,9 @@ class MainWindow(QMainWindow):
 
             self.connected_devnode = devnode
             self.connected_diskseq = diskseq
+
+            if self.state == WAITING_RESTART and self._device_removed:
+                self._new_device_ready = True
 
             # Compter les insertions indépendamment de l'état de la GUI.
             if is_new_device:
@@ -513,6 +531,10 @@ class MainWindow(QMainWindow):
             elif self.state == READY:
                 self._go_waiting_insert()
 
+            if self.state == WAITING_RESTART:
+                self._device_removed = True
+                self._new_device_ready = False
+
             # En WAITING_RESTART, conserver le rapport affiché.
 
 
@@ -529,6 +551,9 @@ class MainWindow(QMainWindow):
 
     def start_test(self, devnode):
         """Prépare l'interface et démarre le thread de test USB."""
+
+        self._device_removed = False
+        self._new_device_ready = False
 
         # Vérification du périphérique avant le test destructif.
         if self.current_diskseq is None:
