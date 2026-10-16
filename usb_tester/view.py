@@ -38,9 +38,11 @@ from config import (
     TEMPLATE_PATH,
     STATION_NAME,
     SOFTWARE_VERSION,
+    TEST_DURATION_MODE,
     TEST_DURATION,
+    TEST_CYCLES,
     REFORMAT_FS,
-    SAP_TEST_LINKS,
+    TEST_LINK_REFS,
     MAX_MATING_CYCLES,
 )
 
@@ -119,7 +121,7 @@ class TestSetupDialog(QDialog):
         self.of_input.setPlaceholderText("Enter OF number")
 
         self.sap_combo = QComboBox()
-        self.sap_combo.addItems(SAP_TEST_LINKS.keys())
+        self.sap_combo.addItems(TEST_LINK_REFS.keys())
 
         self.test_link_label = QLabel()
 
@@ -175,7 +177,7 @@ class TestSetupDialog(QDialog):
         sap = self.sap_combo.currentText()
 
         self.test_link_label.setText(
-            SAP_TEST_LINKS.get(sap, "N/A")
+            TEST_LINK_REFS.get(sap, "N/A")
         )
 
     def update_validation(self):
@@ -195,7 +197,7 @@ class TestSetupDialog(QDialog):
         return {
             "of": self.of_input.text().strip(),
             "sap": sap,
-            "test_link": SAP_TEST_LINKS[sap],
+            "test_link": TEST_LINK_REFS[sap],
         }
 
 
@@ -235,6 +237,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._set_banner(TXT_INSERT, COLORS["wait"])
         self._set_user_status("")
+        self._render_info("")
 
         # Rafraîchissement périodique du graphique.
         self.timer = QTimer(self)
@@ -465,10 +468,10 @@ class MainWindow(QMainWindow):
                     return
 
                 if diskseq is None:
-                    raise RuntimeError("Impossible de récupérer le diskseq USB")
+                    raise RuntimeError("Unable to recover the DiskSeq")
 
             except (OSError, RuntimeError) as exc:
-                self._set_steps_status(f"USB non disponible : {exc}")
+                self._set_steps_status(f"Device unavailable : {exc}")
                 return
 
             # Identifier une nouvelle détection USB.
@@ -488,7 +491,7 @@ class MainWindow(QMainWindow):
                     self._render_info(self.current_info)
 
                 except (OSError, ValueError, TypeError) as exc:
-                    self._set_steps_status(f"Erreur compteur : {exc}")
+                    self._set_steps_status(f"Counter error : {exc}")
 
             # Préparer un test uniquement lorsque la GUI le permet.
             if self.state in (WAITING_INSERT, READY):
@@ -618,7 +621,7 @@ class MainWindow(QMainWindow):
         self._render_info(r.get("report") or self.current_info)
 
         # Génération du docx à la prochaine itération de la boucle Qt.
-        self._set_steps_status("Génération du rapport...")
+        self._set_steps_status("Generating report...")
         QTimer.singleShot(0, lambda: self._display_final_result(r, passed))
 
 
@@ -816,7 +819,11 @@ class MainWindow(QMainWindow):
                 serial=r.get("serial", "N/A"),
                 file_size=f"{TEST_FILE_SIZE_MB} MB",
                 block_size=f"{BLOCK_SIZE_MB} MB",
-                test_duration=f"{TEST_DURATION:g} s",
+                test_duration=(
+                    f"{TEST_CYCLES} cycles"
+                    if TEST_DURATION_MODE == "cycles"
+                    else f"{TEST_DURATION:g} s"
+                ),
                 final_fs=REFORMAT_FS.upper(),
                 station=STATION_NAME,
                 soft_version=SOFTWARE_VERSION,

@@ -21,7 +21,7 @@ USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1"
 # ============================================================
 
 # Mode d'arrêt : "cycles" ou "duration"
-TEST_LIMIT_MODE = "cycles"
+TEST_DURATION_MODE = "cycles"
 TEST_CYCLES = 2                 # Nombre de cycles écriture + lecture
 TEST_DURATION_MIN = 0.5        # Durée du test en minutes
 
@@ -44,7 +44,7 @@ MAX_READ_MBPS = 500.0          # Débit maximal en lecture (MB/s)
 # ============================================================
 
 REFORMAT_FS = "fat32"          # "fat32", "exfat" ou "ntfs"
-REFORMAT_LABEL = "FISCHER"     # Nom du volume après reformatage
+REFORMAT_LABEL = "FISCHER FLASH DRIVE"     # Nom du volume après reformatage
 
 
 # ============================================================
@@ -71,7 +71,7 @@ TEST_DURATION = TEST_DURATION_MIN * 60
 # 6. TEST LINK CONFIGURATION
 # ============================================================
 
-SAP_TEST_LINKS = {
+TEST_LINK_REFS = {
     "123456": "TL-001",
     "153456": "TL-002",
     "126456": "TL-003",
@@ -80,5 +80,5 @@ SAP_TEST_LINKS = {
     "193456": "TL-004",
 }
 
-TEST_LINKS_FILE = Path(__file__).resolve().parent / "test_link.json"
+TEST_LINK_FILE = Path(__file__).resolve().parent / "test_link.json"
 MAX_MATING_CYCLES = 1000

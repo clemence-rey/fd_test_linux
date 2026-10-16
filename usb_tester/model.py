@@ -21,7 +21,7 @@ from docx.shared import Inches
 from datetime import datetime
 from config import (
     USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, 
-    MIN_READ_MBPS, MAX_READ_MBPS, TEST_LINKS_FILE, 
+    MIN_READ_MBPS, MAX_READ_MBPS, TEST_LINK_FILE, 
     MAX_MATING_CYCLES
     )
 
@@ -98,7 +98,7 @@ def get_diskseq(devnode):
 
     except (KeyError, ValueError, OSError, pyudev.DeviceNotFoundError) as exc:
         raise RuntimeError(
-            f"Impossible d'identifier le périphérique {devnode}"
+            f"Unable to identify the device {devnode}"
         ) from exc
 
 
@@ -108,8 +108,8 @@ def assert_same_device(devnode, expected_diskseq):
 
     if current_diskseq != expected_diskseq:
         raise RuntimeError(
-            f"Périphérique remplacé sur {devnode} : "
-            f"DISKSEQ attendu={expected_diskseq}, actuel={current_diskseq}"
+            f"Device replaced on {devnode} : "
+            f"DiskSeq expected={expected_diskseq}, actual={current_diskseq}"
         )
 
 
@@ -120,7 +120,7 @@ def assert_test_port(devnode):
 
     if not id_path.startswith(USB_TEST_PORT + ":"):
         raise RuntimeError(
-            f"Port USB non autorisé : {devnode} (ID_PATH={id_path})"
+            f"Unauthorized port : {devnode} (ID_PATH={id_path})"
         )
 
 # ============================================================
@@ -277,7 +277,7 @@ def open_test_device(devnode, expected_diskseq):
 
         if diskseq != expected_diskseq:
             raise RuntimeError(
-                "Le périphérique USB a changé avant son ouverture"
+                "The USB device was changed before it was opened"
             )
 
         return fd
@@ -325,7 +325,7 @@ def get_mounted_devices(devnode, expected_diskseq):
     ])
 
     if rc != 0:
-        raise RuntimeError(f"Impossible de lire les partitions : {err or out}")
+        raise RuntimeError(f"Unable to read partitions : {err or out}")
 
     return [
         device["path"]
@@ -342,13 +342,13 @@ def unmount_device(devnode, expected_diskseq):
         out, err, rc = run_command(["umount", device])
         if rc != 0:
             raise RuntimeError(
-                f"Impossible de démonter {device} : {err or out}"
+                f"Unable to unmount{device} : {err or out}"
             )
 
     remaining = get_mounted_devices(devnode, expected_diskseq)
     if remaining:
         raise RuntimeError(
-            f"Périphériques encore montés : {', '.join(remaining)}"
+            f"Devices still mounted ; {', '.join(remaining)}"
         )
 
 
@@ -361,7 +361,7 @@ def execute_device_command(devnode, expected_diskseq, cmd, timeout=30, input_tex
 
     if rc != 0:
         raise RuntimeError(
-            f"Commande échouée : {' '.join(cmd)}\n{err or out}"
+            f"Command Failed : {' '.join(cmd)}\n{err or out}"
         )
 
     return out
@@ -371,19 +371,19 @@ def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
     """Recrée une table MBR, une partition unique et son système de fichiers."""
 
     if expected_diskseq is None:
-        raise RuntimeError("Reformatage interdit : DISKSEQ non fourni")
+        raise RuntimeError("Reformatting prohibited: DiskSeq not provided")
 
     fs_type = fs_type.lower().strip()
 
     if fs_type not in FILESYSTEM_CONFIG:
-        raise ValueError(f"Système de fichiers non supporté : {fs_type}")
+        raise ValueError(f"Unsupported file system : {fs_type}")
 
     cfg = FILESYSTEM_CONFIG[fs_type]
 
     # Vérifier les dépendances
     for tool in (cfg["tool"], "sfdisk", "partprobe", "udevadm", "lsblk", "blkid", "sync"):
         if not shutil.which(tool):
-            raise RuntimeError(f"Outil introuvable : {tool}")
+            raise RuntimeError(f"Tool not found : {tool}")
 
     # Créer une table MBR avec une partition unique
     partition_type = {
@@ -426,7 +426,7 @@ def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
 
     if len(partitions) != 1:
         raise RuntimeError(
-            f"Partition unique non détectée sur {devnode}"
+            f"Single partition not detected on {devnode}"
         )
 
     partition = partitions[0]
@@ -460,8 +460,8 @@ def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
 
     if detected != cfg["blkid"]:
         raise RuntimeError(
-            f"{fs_type.upper()} non détecté après reformatage "
-            f"(blkid : {detected or 'inconnu'}, attendu : {cfg['blkid']})"
+            f"{fs_type.upper()} not detected after reformatting "
+            f"(blkid : {detected or 'unknown'}, expected : {cfg['blkid']})"
         )
 
 # ============================================================
@@ -523,29 +523,29 @@ def classify_error(exc, operation=""):
 
     if isinstance(exc, OSError):
         error_map = {
-            errno.ENOENT: ("FILE_NOT_FOUND", "Fichier ou périphérique introuvable"),
-            errno.EIO: ("IO_ERROR", "Erreur d'entrée/sortie"),
-            errno.ENODEV: ("DEVICE_UNAVAILABLE", "Périphérique indisponible"),
-            errno.ENXIO: ("DEVICE_UNAVAILABLE", "Périphérique ou adresse indisponible"),
-            errno.ETIMEDOUT: ("IO_TIMEOUT", "Délai d'entrée/sortie dépassé"),
-            errno.EACCES: ("PERMISSION_DENIED", "Accès refusé"),
-            errno.EBUSY: ("DEVICE_BUSY", "Périphérique occupé"),
-            errno.ENOSPC: ("NO_SPACE", "Espace disponible insuffisant"),
-            errno.EINVAL: ("INVALID_ARGUMENT", "Argument invalide"),
+            errno.ENOENT: ("FILE_NOT_FOUND", "File or device not found"),
+            errno.EIO: ("IO_ERROR", "Input/output error"),
+            errno.ENODEV: ("DEVICE_UNAVAILABLE", "Device unavailable"),
+            errno.ENXIO: ("DEVICE_UNAVAILABLE", "Device or address unavailable"),
+            errno.ETIMEDOUT: ("IO_TIMEOUT", "Input/output timeout"),
+            errno.EACCES: ("PERMISSION_DENIED", "Permission denied"),
+            errno.EBUSY: ("DEVICE_BUSY", "Device busy"),
+            errno.ENOSPC: ("NO_SPACE", "Insufficient disk space"),
+            errno.EINVAL: ("INVALID_ARGUMENT", "Invalid argument"),
         }
-        code, message = error_map.get(exc.errno, ("OS_ERROR", "Erreur système"))
+        code, message = error_map.get(exc.errno, ("OS_ERROR", "System error"))
 
     elif isinstance(exc, ValueError):
-        code, message = "INVALID_VALUE", "Valeur invalide"
+        code, message = "INVALID_VALUE", "Invalid value"
 
     elif isinstance(exc, subprocess.TimeoutExpired):
-        code, message = "COMMAND_TIMEOUT", "Délai d'exécution de la commande dépassé"
+        code, message = "COMMAND_TIMEOUT", "Command execution timeout"
 
     elif isinstance(exc, RuntimeError):
         code, message = "RUNTIME_ERROR", str(exc)
 
     else:
-        code, message = "UNEXPECTED_ERROR", "Erreur inattendue"
+        code, message = "UNEXPECTED_ERROR", "Unexpected error"
 
     if operation:
         message = f"{operation} : {message}"
@@ -618,21 +618,21 @@ def get_failure_reasons(result):
         reasons.extend(result["error"].splitlines())
 
     if result["errors"]:
-        reasons.append(f"{result['errors']} erreur(s) d'intégrité")
+        reasons.append(f"{result['errors']} integrity error(s)")
 
     if 0 < result["avg_write"] <= MIN_WRITE_MBPS:
-        reasons.append("Écriture trop lente")
+        reasons.append("Write speed below minimum threshold")
 
     if 0 < result["avg_read"] <= MIN_READ_MBPS:
-        reasons.append("Lecture trop lente")
+        reasons.append("Read speed below minimum threshold")
     elif result["avg_read"] >= MAX_READ_MBPS:
-        reasons.append("Lecture trop rapide")
+        reasons.append("Read speed above maximum threshold")
 
     if not reasons:
-        if result.get("reformat", "").startswith("ÉCHEC"):
-            reasons.append("Échec du reformatage (voir section REFORMATAGE)")
+        if result.get("reformat", "").startswith("FAILURE"):
+            reasons.append("Reformatting failed (see REFORMATTING section)")
         else:
-            reasons.append("Test incomplet ou interrompu")
+            reasons.append("Test incomplete or interrupted")
 
     return reasons
 
@@ -642,7 +642,7 @@ def build_report(info, result):
     lines = [
         format_device_info(info),
         "",
-        "=== PERFORMANCES ===",
+        "=== PERFORMANCE ===",
         "",
     ]
 
@@ -660,16 +660,16 @@ def build_report(info, result):
 
         if stats["n"] >= 2:
             lines.append(
-                f"  {'Std (per cycle)':<18}: "
+                f"  {'Std (per cycle) ':<18}: "
                 f"{stats['std']:8.2f} MB/s "
                 f"(n = {stats['n']} cycles)"
             )
 
             cv = f"{stats['cv']:8.2f} %" if stats["cv"] is not None else "N/A"
-            lines.append(f"  {'CV (per cycle)':<18}: {cv}")
+            lines.append(f"  {'CV (per cycle) ':<18}: {cv}")
         else:
             lines.append(
-                f"  {'Std / CV':<18}: N/A (less than 2 cycles mesured)"
+                f"  {'Std / CV':<18}: N/A (less than 2 cycles measured)"
             )
 
         lines.append("")
@@ -677,7 +677,7 @@ def build_report(info, result):
     # Intégrité
     lines.extend([
         "=== INTEGRITY ===",
-        f"{'Integrity errors':<20}: "
+        f"{'Integrity errors ':<20}: "
         f"{result['errors'] if result['read_stats']['n'] > 0 else 'N/A'}",
         "",
     ])
@@ -733,7 +733,7 @@ def write_docx_report(
 
     if not template_path.is_file():
         raise FileNotFoundError(
-            f"Template DOCX introuvable : {template_path}"
+            f"DOCX template not found  : {template_path}"
         )
 
     doc = Document(str(template_path))
@@ -873,17 +873,17 @@ def write_docx_report(
 def load_test_link_counters():
     """Load persistent mating cycle counters."""
 
-    if not TEST_LINKS_FILE.exists():
+    if not TEST_LINK_FILE.exists():
         return {}
 
-    with open(TEST_LINKS_FILE, "r", encoding="utf-8") as file:
+    with open(TEST_LINK_FILE, "r", encoding="utf-8") as file:
         return json.load(file)
 
 
 def save_test_link_counters(counters):
     """Save mating cycle counters atomically."""
 
-    TEST_LINKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TEST_LINK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     temporary_path = None
 
@@ -891,7 +891,7 @@ def save_test_link_counters(counters):
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
-            dir=TEST_LINKS_FILE.parent,
+            dir=TEST_LINK_FILE.parent,
             delete=False,
         ) as file:
             temporary_path = file.name
@@ -902,7 +902,7 @@ def save_test_link_counters(counters):
             file.flush()
             os.fsync(file.fileno())
 
-        os.replace(temporary_path, TEST_LINKS_FILE)
+        os.replace(temporary_path, TEST_LINK_FILE)
 
     finally:
         if temporary_path and os.path.exists(temporary_path):

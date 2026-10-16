@@ -10,7 +10,7 @@ from contextlib import ExitStack
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from config import (
-    RESULTS_DIR, FILE_SIZE, BLOCK_SIZE, NUMBER_BLOCKS, TEST_LIMIT_MODE,
+    RESULTS_DIR, FILE_SIZE, BLOCK_SIZE, NUMBER_BLOCKS, TEST_DURATION_MODE,
     TEST_CYCLES, TEST_DURATION, MIN_WRITE_MBPS, MIN_READ_MBPS, MAX_READ_MBPS,
     REFORMAT_FS, REFORMAT_LABEL,
 )
@@ -50,7 +50,7 @@ class UsbWatcher(QThread):
   
   
     def run(self):
-        """Surveille les événements udev et actualise l'état du port USB."""
+        """Surveille les événements USB et détecte rapidement les périphériques."""
         context = pyudev.Context()
         monitor = pyudev.Monitor.from_netlink(context)
         monitor.filter_by(subsystem="block")
@@ -78,13 +78,18 @@ class UsbWatcher(QThread):
                     self._current_devnode = None
                     self._current_diskseq = None
 
-                # Attendre la stabilisation des autres événements.
+                # Détection immédiate d'un nouveau disque.
+                if device.action == "add" and device.device_type == "disk":
+                    self._update_device()
+
+                # Prévoir un nouveau scan après stabilisation des événements.
                 scan_pending = True
                 last_event = time.monotonic()
 
             now = time.monotonic()
 
-            if (scan_pending and now - last_event >= 0.8) or now - last_scan >= 2.0:
+            # Scan après stabilisation ou vérification périodique.
+            if (scan_pending and now - last_event >= 0.15) or now - last_scan >= 2.0:
                 self._update_device()
                 scan_pending = False
                 last_scan = now
@@ -101,7 +106,7 @@ class UsbWatcher(QThread):
 
         if len(candidates) > 1:
             raise RuntimeError(
-                "Plusieurs disques détectés sur le port USB réservé"
+                "Multiple disks detected on the reserved USB porté"
             )
 
         if not candidates:
@@ -159,7 +164,7 @@ class TestWorker(QThread):
         self.devnode = devnode
         self.expected_diskseq = expected_diskseq
 
-        self._abort_reason = "Test interrompu"
+        self._abort_reason = "Test interrupted"
 
         self.device_info = None
         self.current_result = None
@@ -196,7 +201,7 @@ class TestWorker(QThread):
                 set_result_error(result, e, "Test")
                 result["result"] = "FAIL"
                 result["completed"] = False
-                result["reformat"] = "NON EFFECTUÉ (test interrompu)"
+                result["reformat"] = "NOT PERFORMED (test interrupted)"
 
                 if self.isInterruptionRequested():
                     result["error"] = self._abort_reason
@@ -222,8 +227,8 @@ class TestWorker(QThread):
             except Exception as report_error:
                 # Le rapport ne doit pas empêcher le verdict final.
                 result["report"] = (
-                    f"FAIL - {result.get('error', 'Erreur inconnue')}\n"
-                    f"Rapport indisponible : {report_error}"
+                    f"FAIL - {result.get('error', 'Unknown error')}\n"
+                    f"Report not available : {report_error}"
                 )
 
             # Transmettre le rapport ou son texte de secours.
@@ -235,7 +240,7 @@ class TestWorker(QThread):
             self.test_done.emit(result)
 
 
-    def abort(self, reason="Test interrompu"):
+    def abort(self, reason="Test interrupted"):
         """Demande l'interruption du test avec une raison explicite."""
         self._abort_reason = reason
         self.requestInterruption()
@@ -272,7 +277,7 @@ class TestWorker(QThread):
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
         # Récupérer les informations du périphérique.
-        self.status.emit("Lecture des informations du périphérique...")
+        self.status.emit("Reading device information...")
         info = get_device_info(devnode)
         self.device_info = info.copy()
 
@@ -286,7 +291,7 @@ class TestWorker(QThread):
         self.info_ready.emit(format_device_info(info))
 
         # Démonter les partitions pour accéder directement au disque.
-        self.status.emit("Démontage / accès brut au périphérique...")
+        self.status.emit("Unmounting / raw access to the device...")
         unmount_device(devnode, self.expected_diskseq)
 
         # Vérifier que la capacité permet d'exécuter le test.
@@ -294,11 +299,11 @@ class TestWorker(QThread):
             device_size = get_device_size_bytes(devnode)
         except Exception as e:
             raise RuntimeError(
-                f"Périphérique inaccessible : {e}"
+                f"Device unavailable : {e}"
             ) from e
 
         if device_size < FILE_SIZE * 1.1:
-            raise RuntimeError("Périphérique trop petit pour ce test")
+            raise RuntimeError("The device's storage is too small for this test")
 
         # PRÉPARATION DES DONNÉES ET DES MESURES
 
@@ -354,14 +359,14 @@ class TestWorker(QThread):
                         "SEP", float("nan"), float("nan")
                     )
 
-                if TEST_LIMIT_MODE == "cycles":
+                if TEST_DURATION_MODE == "cycles":
                     label_cycle = f"{cycle}/{TEST_CYCLES}"
                 else:
                     label_cycle = str(cycle)
 
                 # 3.1 ÉCRITURE
 
-                self.status.emit(f"Cycle {label_cycle} - ÉCRITURE")
+                self.status.emit(f"Cycle {label_cycle} - WRITE")
 
                 try:
                     # Recommencer l'écriture au début du disque.
@@ -387,7 +392,7 @@ class TestWorker(QThread):
 
                 except Exception as e:
                     io_failed = True
-                    set_result_error(result, e, "Écriture")
+                    set_result_error(result, e, "Write")
 
                 # Ne pas poursuivre après une erreur ou une interruption.
                 if io_failed or self.isInterruptionRequested():
@@ -395,12 +400,12 @@ class TestWorker(QThread):
 
                 # En mode durée, ne pas commencer la lecture si
                 # la durée est déjà atteinte après l'écriture.
-                if TEST_LIMIT_MODE == "duration" and self._is_limit_reached():
+                if TEST_DURATION_MODE == "duration" and self._is_limit_reached():
                     break
 
                 # 3.2 LECTURE ET VÉRIFICATION D'INTÉGRITÉ
 
-                self.status.emit(f"Cycle {label_cycle} - LECTURE")
+                self.status.emit(f"Cycle {label_cycle} - READ")
 
                 try:
                     # Relire les données depuis le début du disque.
@@ -428,7 +433,7 @@ class TestWorker(QThread):
 
                 except Exception as e:
                     io_failed = True
-                    set_result_error(result, e, "Lecture")
+                    set_result_error(result, e, "Read")
 
         # ANNULATION VOLONTAIRE
         # Les fichiers et le périphérique brut sont maintenant fermés.
@@ -459,7 +464,7 @@ class TestWorker(QThread):
                 result["error"] = self._abort_reason
 
             # Ne jamais reformater après une interruption ou erreur d'E/S.
-            result["reformat"] = "NON EFFECTUÉ (test interrompu)"
+            result["reformat"] = "NOT PERFORMED (test interrupted)"
             return self._build_and_emit_report(info, result)
 
         # REFORMATAGE DU PÉRIPHÉRIQUE
@@ -513,8 +518,8 @@ class TestWorker(QThread):
             # Une écriture partielle est considérée comme une erreur.
             if written != BLOCK_SIZE:
                 raise OSError(
-                    f"Écriture partielle au bloc {block_number} "
-                    f"({written}/{BLOCK_SIZE} octets)"
+                    f"Partial writing at block {block_number} "
+                    f"({written}/{BLOCK_SIZE} bytes)"
                 )
 
             # CALCUL DES PERFORMANCES
@@ -529,7 +534,7 @@ class TestWorker(QThread):
 
             # VÉRIFICATION DE LA DURÉE
             if (
-                TEST_LIMIT_MODE == "duration"
+                TEST_DURATION_MODE == "duration"
                 and elapsed() >= TEST_DURATION
             ):
                 break
@@ -585,7 +590,7 @@ class TestWorker(QThread):
             # Une lecture nulle indique une erreur.
             if n == 0:
                 raise OSError(
-                    f"Lecture interrompue au bloc {block_number}"
+                    f"Read operation interrupted at the data block {block_number}"
                 )
 
             # CALCUL DES PERFORMANCES
@@ -614,7 +619,7 @@ class TestWorker(QThread):
 
             # VÉRIFICATION DE LA DURÉE
             if (
-                TEST_LIMIT_MODE == "duration"
+                TEST_DURATION_MODE == "duration"
                 and elapsed() >= TEST_DURATION
             ):
                 break
@@ -630,7 +635,7 @@ class TestWorker(QThread):
 
     def _is_limit_reached(self):
         """Indique si la limite de cycles ou de durée du test est atteinte."""
-        if TEST_LIMIT_MODE == "cycles":
+        if TEST_DURATION_MODE == "cycles":
             return self._cycle >= TEST_CYCLES
         return self._get_elapsed() >= TEST_DURATION
 
@@ -638,7 +643,7 @@ class TestWorker(QThread):
     def _emit_progress(self, phase, block_number):
         """Transmet à la GUI une progression limitée à 95 % pendant les E/S."""
 
-        if TEST_LIMIT_MODE == "cycles":
+        if TEST_DURATION_MODE == "cycles":
             fraction = (block_number + 1) / NUMBER_BLOCKS
 
             if phase == "write":
@@ -704,10 +709,10 @@ class TestWorker(QThread):
             result["result"] = "FAIL"
             result["completed"] = False
             result["error"] = self._abort_reason
-            result["reformat"] = "NON EFFECTUÉ (test interrompu)"
+            result["reformat"] = "NOT PERFORMED (test interrupted)"
             return
 
-        self.status.emit(f"Reformatage en {REFORMAT_FS.upper()}...")
+        self.status.emit(f"Reformatting to {REFORMAT_FS.upper()}...")
 
         try:
             reformat_device(
@@ -718,19 +723,19 @@ class TestWorker(QThread):
             )
 
             result["reformat"] = (
-                f"OK - {self.devnode} reformaté en "
-                f"{REFORMAT_FS.upper()} et vérifié."
+                f"OK - {self.devnode} reformatted to "
+                f"{REFORMAT_FS.upper()} and verified."
             )
 
         except Exception as e:
-            set_result_error(result, e, "Reformatage")
-            result["reformat"] = f"ÉCHEC : {result['error']}"
+            set_result_error(result, e, "Reformatting")
+            result["reformat"] = f"FAILURE : {result['error']}"
 
 
     def _cancel_test(self, result):
         """Nettoie les résultats et tente de restaurer la clé après annulation."""
 
-        self.status.emit("Annulation : nettoyage des fichiers...")
+        self.status.emit("Cancellation: Cleaning up files...")
 
         # Supprimer uniquement les fichiers associés au test courant.
         for key in ("docx"):
@@ -740,7 +745,7 @@ class TestWorker(QThread):
                 try:
                     Path(path).unlink(missing_ok=True)
                 except OSError as exc:
-                    self.status.emit(f"Suppression impossible : {exc}")
+                    self.status.emit(f"Cannot delete : {exc}")
 
         # Vérifier l'identité de la clé avant toute opération destructive.
         try:
@@ -748,7 +753,7 @@ class TestWorker(QThread):
             assert_same_device(self.devnode, self.expected_diskseq)
 
             self.status.emit(
-                f"Annulation : reformatage en {REFORMAT_FS.upper()}..."
+                f"Cancellation: Reformat to {REFORMAT_FS.upper()}..."
             )
 
             reformat_device(
@@ -761,7 +766,7 @@ class TestWorker(QThread):
         except Exception as exc:
             result["result"] = "CANCEL_FAILED"
             result["error"] = str(exc)
-            result["reformat"] = f"ÉCHEC : {exc}"
+            result["reformat"] = f"FAILURE : {exc}"
             return result
 
         result["result"] = "CANCELLED"
