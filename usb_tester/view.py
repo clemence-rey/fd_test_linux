@@ -16,7 +16,13 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QSplitter,
     QStackedWidget,
+    QDialog,
+    QFormLayout,
+    QLineEdit,
+    QComboBox,
+    QDialogButtonBox,
 )
+
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import (
@@ -34,6 +40,8 @@ from config import (
     SOFTWARE_VERSION,
     TEST_DURATION,
     REFORMAT_FS,
+    SAP_TEST_LINKS,
+    MAX_MATING_CYCLES,
 )
 
 from controller import (
@@ -48,6 +56,8 @@ from model import (
     assert_same_device,
     assert_test_port,
     write_docx_report,
+    increment_test_link_counter,
+    load_test_link_counters,
 )
 
 # ============================================================
@@ -62,22 +72,132 @@ COLORS = {
     "pass": "#1e7e34",
     "fail": "#b02a37",
 }
+# -- Titre de la fenètre de test
+TXT_WINDOW_TITLE = "EOL test flash drive"
 
-TXT_INSERT = "Insérez une clé USB"
-TXT_TESTING = "Test en cours..."
+# -- Texte de la banière
+TXT_INSERT = "Insert flash drive"
+TXT_READY = "Flash drive detected"
+TXT_TESTING = "In progress..."
 TXT_PASS = "PASS"
 TXT_FAIL = "FAIL"
-TXT_DO_NOT_UNPLUG = "Ne pas débrancher svp"
-TXT_REMOVE = "Retirer la clé"
-TXT_READY = "Clé détectée"
-TXT_START = "START"
-TXT_INTERRUPT = "TEST INTERROMPU"
+TXT_INTERRUPT = "TEST INTERRUPTED"
 
+# -- texte de statut
+TXT_DO_NOT_UNPLUG = "Do not unplug"
+TXT_REMOVE = "Remove flash drive"
+
+# -- texte boutons
+TXT_BUTTON_START = "START"
+TXT_BUTTON_NEW_TEST = "NEW TEST"
+TXT_BUTTON_CANCEL_TEST = "CANCEL TEST"
+
+# -- taille des textes
 SIZE_TXT_BANNER = 44
 SIZE_TXT_STATUS = 11
 SIZE_TXT_DEV_STATUS = 10
 SIZE_TXT_BUTTON = 16
 SIZE_TXT_INFO = 9
+
+
+# ============================================================
+# 2. TEST CONFIGURATION
+# ============================================================
+
+class TestSetupDialog(QDialog):
+    """Configure l'OF, le SAP et le test link au lancement."""
+
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle(TXT_WINDOW_TITLE)
+        self.setFixedWidth(400)
+
+        # --- Widgets ---
+
+        self.of_input = QLineEdit()
+        self.of_input.setPlaceholderText("Enter OF number")
+
+        self.sap_combo = QComboBox()
+        self.sap_combo.addItems(SAP_TEST_LINKS.keys())
+
+        self.test_link_label = QLabel()
+
+        # --- Layout ---
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("TEST CONFIGURATION")
+        title.setFont(QFont("Sans", 16, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(title)
+
+        form = QFormLayout()
+
+        form.addRow("OF Number:", self.of_input)
+        form.addRow("SAP Number:", self.sap_combo)
+        form.addRow("Test Link:", self.test_link_label)
+
+        layout.addLayout(form)
+
+        # --- Buttons ---
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+
+        self.buttons.button(QDialogButtonBox.Ok).setText("START SESSION")
+
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        layout.addWidget(self.buttons)
+
+        # --- Signals ---
+
+        self.sap_combo.currentTextChanged.connect(
+            self.update_test_link
+        )
+
+        self.of_input.textChanged.connect(
+            self.update_validation
+        )
+
+        # --- Initialisation ---
+
+        self.update_test_link()
+        self.update_validation()
+
+    def update_test_link(self):
+        """Affiche le test link associé au SAP sélectionné."""
+
+        sap = self.sap_combo.currentText()
+
+        self.test_link_label.setText(
+            SAP_TEST_LINKS.get(sap, "N/A")
+        )
+
+    def update_validation(self):
+        """Autorise le démarrage uniquement si l'OF est renseigné."""
+
+        valid = bool(self.of_input.text().strip())
+
+        self.buttons.button(
+            QDialogButtonBox.Ok
+        ).setEnabled(valid)
+
+    def get_configuration(self):
+        """Retourne les paramètres sélectionnés par l'opérateur."""
+
+        sap = self.sap_combo.currentText()
+
+        return {
+            "of": self.of_input.text().strip(),
+            "sap": sap,
+            "test_link": SAP_TEST_LINKS[sap],
+        }
+
 
 # ============================================================
 # 2. FENÊTRE PRINCIPALE
@@ -88,11 +208,12 @@ class MainWindow(QMainWindow):
 
     # --- Initialisation de l'interface ---
 
-    def __init__(self):
+    def __init__(self, test_config):
         """Initialise la fenêtre, ses états et les threads de surveillance."""
         super().__init__()
 
-        self.setWindowTitle("EOL test flash drive")
+        self.test_config = test_config
+        self.setWindowTitle(TXT_WINDOW_TITLE)
         self.setWindowState(self.windowState() | Qt.WindowMaximized)
 
         # Périphérique USB et état de l'application.
@@ -102,6 +223,7 @@ class MainWindow(QMainWindow):
         self.connected_diskseq = None
         self.state = WAITING_INSERT
         self._waiting_for_removal = False
+        self.current_info = ""
 
         # Gestion des threads.
         self.worker = None
@@ -147,20 +269,20 @@ class MainWindow(QMainWindow):
         root.addWidget(self.status_label)
 
         # --- Bouton START ---
-        self.start_button = QPushButton(TXT_START)
+        self.start_button = QPushButton(TXT_BUTTON_START)
         self.start_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
         self.start_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.on_start_clicked)
 
         # --- Bouton NOUVEAU TEST ---
-        self.restart_button = QPushButton("NOUVEAU TEST")
+        self.restart_button = QPushButton(TXT_BUTTON_NEW_TEST)
         self.restart_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
         self.restart_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
         self.restart_button.clicked.connect(self.on_restart_clicked)
 
         # --- Bouton ANNULER TEST ---
-        self.cancel_button = QPushButton("ANNULER LE TEST")
+        self.cancel_button = QPushButton(TXT_BUTTON_CANCEL_TEST)
         self.cancel_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
         self.cancel_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
         self.cancel_button.clicked.connect(self.on_cancel_clicked)
@@ -215,12 +337,12 @@ class MainWindow(QMainWindow):
             assert_test_port(devnode)
 
             if diskseq is None:
-                raise RuntimeError("Identité USB non disponible")
+                raise RuntimeError("USB ID not available")
 
             actual_diskseq = get_diskseq(devnode)
 
             if actual_diskseq is None or actual_diskseq != diskseq:
-                raise RuntimeError("La clé a changé pendant sa détection")
+                raise RuntimeError("The USB flash drive changed while it was being detected")
 
             info = get_device_info(devnode)
 
@@ -229,7 +351,7 @@ class MainWindow(QMainWindow):
 
         except (OSError, RuntimeError) as exc:
             self._go_waiting_insert()
-            self._set_steps_status(f"Détection USB échouée : {exc}")
+            self._set_steps_status(f"USB detection failed : {exc}")
             return
 
         self.state = READY
@@ -239,7 +361,7 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self._set_banner(TXT_READY, COLORS["wait"])
         self._set_user_status(self._get_device_label(info))
-        self._set_steps_status("clé détectée, en attente de START")
+        self._set_steps_status("Flash drive detected, waiting for START")
         self._render_info(format_device_info(info))
 
         self.start_button.setEnabled(True)
@@ -278,7 +400,7 @@ class MainWindow(QMainWindow):
 
         except (OSError, RuntimeError) as exc:
             self._go_waiting_insert()
-            self._set_steps_status(f"Périphérique invalide : {exc}")
+            self._set_steps_status(f"Invalid device: {exc}")
             return
 
         self.start_button.setEnabled(False)
@@ -288,7 +410,7 @@ class MainWindow(QMainWindow):
 
         except (OSError, RuntimeError) as exc:
             self._go_waiting_insert()
-            self._set_steps_status(f"Démarrage impossible : {exc}")
+            self._set_steps_status(f"Unable to start: {exc}")
 
 
     def on_cancel_clicked(self):
@@ -304,9 +426,9 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
 
         # Informer l'opérateur.
-        self._set_banner("Annulation en cours...", COLORS["test"])
-        self._set_user_status("Ne pas retirer la clé USB.")
-        self._set_steps_status("Arrêt des opérations USB...")
+        self._set_banner("Cancellation in progress...", COLORS["test"])
+        self._set_user_status("Do not unplug the flash drive.")
+        self._set_steps_status("Stopping test operations...")
 
         # Demander l'arrêt du worker.
         self.worker.cancel()
@@ -333,7 +455,6 @@ class MainWindow(QMainWindow):
 
     def on_usb_event(self, devnode, event):
         """Traite les connexions et déconnexions du port réservé."""
-        
 
         if event == "inserted":  
             try:
@@ -350,9 +471,26 @@ class MainWindow(QMainWindow):
                 self._set_steps_status(f"USB non disponible : {exc}")
                 return
 
+            # Identifier une nouvelle détection USB.
+            is_new_device = (
+                self.connected_devnode,
+                self.connected_diskseq,
+            ) != (devnode, diskseq)
+
             self.connected_devnode = devnode
             self.connected_diskseq = diskseq
 
+            # Compter les insertions indépendamment de l'état de la GUI.
+            if is_new_device:
+                try:
+                    test_link = self.test_config["test_link"]
+                    increment_test_link_counter(test_link)
+                    self._render_info(self.current_info)
+
+                except (OSError, ValueError, TypeError) as exc:
+                    self._set_steps_status(f"Erreur compteur : {exc}")
+
+            # Préparer un test uniquement lorsque la GUI le permet.
             if self.state in (WAITING_INSERT, READY):
                 if (self.current_devnode, self.current_diskseq) != (devnode, diskseq):
                     self._go_ready(devnode, diskseq)
@@ -391,7 +529,7 @@ class MainWindow(QMainWindow):
 
         # Vérification du périphérique avant le test destructif.
         if self.current_diskseq is None:
-            raise RuntimeError("Identité USB non initialisée")
+            raise RuntimeError("Flash drive identity not initialized")
 
         assert_test_port(devnode)
         assert_same_device(devnode, self.current_diskseq)
@@ -437,15 +575,15 @@ class MainWindow(QMainWindow):
             self.state = WAITING_RESTART
 
             self._set_banner(
-                "ANNULATION ÉCHOUÉE",
+                "Cancellation failed",
                 COLORS["fail"]
             )
 
             self._set_user_status(
-                "La clé n'a pas pu être restaurée."
+                "The flash drive could not be restored."
             )
 
-            self._set_steps_status(r.get("error", "Erreur inconnue"))
+            self._set_steps_status(r.get("error", "Unknown error"))
 
             self.button_stack.setCurrentWidget(self.restart_button)
             return
@@ -520,13 +658,27 @@ class MainWindow(QMainWindow):
 
     def _set_steps_status(self, text):
         """Affiche l'étape en cours du test."""
-        self.dev_status_label.setText(f"Étape : {text}")
+        self.dev_status_label.setText(f"Step : {text}")
 
 
     def _render_info(self, text):
-        """Affiche les informations du test courant."""
+        """Affiche les informations du test link et du test courant."""
+
+        test_link = self.test_config["test_link"]
+        counters = load_test_link_counters()
+
+        link_data = counters.get(test_link, {})
+        cycles = link_data.get("cycles", 0)
+        max_cycles = link_data.get("max_cycles", MAX_MATING_CYCLES)
+
+        header = (
+            "=== TEST-LINK ===\n"
+            f"Reference : {test_link}\n"
+            f"Mating cycle : {cycles} / {max_cycles}"
+        )
+
         self.current_info = text
-        self.info_text.setPlainText(text)
+        self.info_text.setPlainText(f"{header}\n\n{text}")
 
 
     def _reset_view(self):
@@ -638,7 +790,7 @@ class MainWindow(QMainWindow):
             self._set_user_status("")
         else:
             self._set_user_status(
-                "ATTENTION : le rapport DOCX n'a pas été enregistré."
+                "WARNING: The report has not been saved."
             )
 
         self.start_button.setEnabled(False)
@@ -658,6 +810,8 @@ class MainWindow(QMainWindow):
                 output_path=path,
                 report_text=r.get("report", ""),
                 figure=self.figure,
+                of_number=self.test_config["of"],
+                sap=self.test_config["sap"],
                 device=r.get("model", "N/A"),
                 serial=r.get("serial", "N/A"),
                 file_size=f"{TEST_FILE_SIZE_MB} MB",
@@ -669,10 +823,10 @@ class MainWindow(QMainWindow):
             )
 
         except Exception as exc:
-            self._set_steps_status(f"Échec du rapport DOCX : {exc}")
+            self._set_steps_status(f"Report failed: {exc}")
             return False
 
-        self._set_steps_status(f"Rapport DOCX enregistré : {path}")
+        self._set_steps_status(f"Report saved: {path}")
         return True
 
 

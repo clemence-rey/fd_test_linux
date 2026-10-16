@@ -10,6 +10,7 @@ import mmap
 import shutil
 import fcntl
 import struct
+import tempfile
 import subprocess
 import numpy as np
 import pyudev
@@ -18,7 +19,11 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Inches
 from datetime import datetime
-from config import (USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, MIN_READ_MBPS, MAX_READ_MBPS)
+from config import (
+    USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, 
+    MIN_READ_MBPS, MAX_READ_MBPS, TEST_LINKS_FILE, 
+    MAX_MATING_CYCLES
+    )
 
 
 BLKGETDISKSEQ = 0x80081280
@@ -597,7 +602,7 @@ def format_device_info(info):
         ("USBVersion", "USB Version"),
     )
 
-    lines = ["=== PÉRIPHÉRIQUE ==="]
+    lines = ["=== DEVICE INFORMATION ==="]
 
     for key, label in labels:
         lines.append(f"{label:<14}: {info.get(key, 'N/A')}")
@@ -643,50 +648,50 @@ def build_report(info, result):
 
     # Performances
     for label, avg, stats in (
-        ("Écriture", result["avg_write"], result["write_stats"]),
-        ("Lecture", result["avg_read"], result["read_stats"]),
+        ("Write", result["avg_write"], result["write_stats"]),
+        ("Read", result["avg_read"], result["read_stats"]),
     ):
         lines.append(label)
 
         if stats["n"] > 0:
-            lines.append(f"  {'Moyenne globale':<18}: {avg:8.2f} MB/s")
+            lines.append(f"  {'Global average':<18}: {avg:8.2f} MB/s")
         else:
-            lines.append(f"  {'Moyenne globale':<18}: N/A")
+            lines.append(f"  {'Global average':<18}: N/A")
 
         if stats["n"] >= 2:
             lines.append(
-                f"  {'Std (par cycle)':<18}: "
+                f"  {'Std (per cycle)':<18}: "
                 f"{stats['std']:8.2f} MB/s "
                 f"(n = {stats['n']} cycles)"
             )
 
             cv = f"{stats['cv']:8.2f} %" if stats["cv"] is not None else "N/A"
-            lines.append(f"  {'CV (par cycle)':<18}: {cv}")
+            lines.append(f"  {'CV (per cycle)':<18}: {cv}")
         else:
             lines.append(
-                f"  {'Std / CV':<18}: N/A (moins de 2 cycles mesurés)"
+                f"  {'Std / CV':<18}: N/A (less than 2 cycles mesured)"
             )
 
         lines.append("")
 
     # Intégrité
     lines.extend([
-        "=== INTÉGRITÉ ===",
-        f"{'Erreurs intégrité':<20}: "
+        "=== INTEGRITY ===",
+        f"{'Integrity errors':<20}: "
         f"{result['errors'] if result['read_stats']['n'] > 0 else 'N/A'}",
         "",
     ])
 
     # Reformatage
     lines.extend([
-        "=== REFORMATAGE ===",
+        "=== REFORMATTING ===",
         result.get("reformat", "N/A"),
         "",
     ])
 
     # Verdict final
     lines.extend([
-        "================= RÉSULTAT FINAL =================",
+        "================= FINAL RESULT =================",
         "",
     ])
 
@@ -698,7 +703,7 @@ def build_report(info, result):
 
     lines.extend([
         "",
-        "==================================================",
+        "================================================",
     ])
 
     return "\n".join(lines)
@@ -822,12 +827,12 @@ def write_docx_report(
 
     if not found_text:
         raise RuntimeError(
-            "Placeholder {{RESULT_TEXT}} introuvable dans le template"
+            "Placeholder {{RESULT_TEXT}} not found in the template"
         )
 
     if not found_graph:
         raise RuntimeError(
-            "Placeholder {{RESULT_GRAPH}} introuvable dans le template"
+            "Placeholder {{RESULT_GRAPH}} not found in the template"
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -855,6 +860,68 @@ def write_docx_report(
         ],
         check=True,
         timeout=60,
+        capture_output=True,
+        text=True,
     )
 
     return output_path
+
+# ============================================================
+# 8. GESTION DES COMPTEURS D'USURE DES TEST-LINKS
+# ============================================================
+
+def load_test_link_counters():
+    """Load persistent mating cycle counters."""
+
+    if not TEST_LINKS_FILE.exists():
+        return {}
+
+    with open(TEST_LINKS_FILE, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def save_test_link_counters(counters):
+    """Save mating cycle counters atomically."""
+
+    TEST_LINKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    temporary_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=TEST_LINKS_FILE.parent,
+            delete=False,
+        ) as file:
+            temporary_path = file.name
+
+            os.chmod(file.name, 0o644)
+
+            json.dump(counters, file, indent=4)
+            file.flush()
+            os.fsync(file.fileno())
+
+        os.replace(temporary_path, TEST_LINKS_FILE)
+
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
+def increment_test_link_counter(test_link):
+    """Increment and persist the mating cycle counter."""
+
+    counters = load_test_link_counters()
+
+    if test_link not in counters:
+        counters[test_link] = {
+            "cycles": 0,
+            "max_cycles": MAX_MATING_CYCLES,
+        }
+
+    counters[test_link]["cycles"] += 1
+
+    save_test_link_counters(counters)
+
+    return counters[test_link]["cycles"]

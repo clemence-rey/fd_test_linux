@@ -7,9 +7,9 @@ et lance l'interface graphique.
 
 import sys
 import os
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QDialog
 
-from view import MainWindow
+from view import MainWindow, TestSetupDialog
 
 # ============================================================
 # 1. GESTION DES PRIVILÈGES
@@ -24,7 +24,7 @@ def ensure_root():
 
     env_vars = [
         f"{key}={os.environ[key]}"
-        for key in ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR")
+        for key in ("DISPLAY", "XAUTHORITY")
         if os.environ.get(key)
     ]
 
@@ -48,8 +48,16 @@ def main():
     # Initialisation de l'application Qt.
     app = QApplication(sys.argv)
 
+    # Configuration de la session.
+    setup = TestSetupDialog()
+
+    if setup.exec_() != QDialog.Accepted:
+        sys.exit(0)
+
+    test_config = setup.get_configuration()
+
     # Création et affichage de la fenêtre principale.
-    win = MainWindow()
+    win = MainWindow(test_config)
     win.show()
 
     # Exécution de la boucle d'événements Qt.

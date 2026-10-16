@@ -65,3 +65,20 @@ NUMBER_BLOCKS = FILE_SIZE // BLOCK_SIZE
 
 # Conversion de la durée en secondes
 TEST_DURATION = TEST_DURATION_MIN * 60
+
+
+# ============================================================
+# 6. TEST LINK CONFIGURATION
+# ============================================================
+
+SAP_TEST_LINKS = {
+    "123456": "TL-001",
+    "153456": "TL-002",
+    "126456": "TL-003",
+    "323456": "TL-004",
+    "783456": "TL-001",
+    "193456": "TL-004",
+}
+
+TEST_LINKS_FILE = Path(__file__).resolve().parent / "test_link.json"
+MAX_MATING_CYCLES = 1000
