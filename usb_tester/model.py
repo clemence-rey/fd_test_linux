@@ -844,4 +844,17 @@ def write_docx_report(
     finally:
         temp_path.unlink(missing_ok=True)
 
+    # Conversion DOCX -> PDF avec LibreOffice.
+    subprocess.run(
+        [
+            "libreoffice",
+            "--headless",
+            "--convert-to", "pdf",
+            "--outdir", str(output_path.parent),
+            str(output_path),
+        ],
+        check=True,
+        timeout=60,
+    )
+
     return output_path
