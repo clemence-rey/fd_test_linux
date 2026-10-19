@@ -1,5 +1,6 @@
 """Surveillance USB et exécution des tests dans des threads Qt indépendants."""
 
+import csv
 import hashlib
 import os
 import time
@@ -15,7 +16,8 @@ from config import (
     REFORMAT_FS, REFORMAT_LABEL,
 )
 from model import (
-    compute_speed_stats, 
+    compute_inter_cycle_stats, 
+    compute_intra_cycle_stats,
     set_result_error, 
     assert_same_device, 
     get_diskseq,
@@ -316,8 +318,9 @@ class TestWorker(QThread):
         errors = 0
         total_written = total_read = 0
         write_io_time = read_io_time = 0.0
-        cycle_write_speeds = []
-        cycle_read_speeds = []
+        cycle_write_measurements = []
+        cycle_read_measurements = []
+        
         cycle = 0
 
         self._cycle = 0
@@ -334,6 +337,17 @@ class TestWorker(QThread):
             read_buffer = stack.enter_context(
                 create_aligned_buffer(BLOCK_SIZE)
             )
+
+            # Fichier CSV contenant les mesures de chaque bloc.
+            csv_handle = stack.enter_context(
+                open(result["csv"], "w", newline="", encoding="utf-8")
+            )
+
+            writer = csv.writer(csv_handle)
+            writer.writerow([
+                "Cycle", "Operation", "Block number", "Block size",
+                "Duration_s", "MB/s", "Integrity"
+            ])
 
             # Point de départ du chronométrage global.
             self._global_start = time.perf_counter()
@@ -372,23 +386,22 @@ class TestWorker(QThread):
                     # Recommencer l'écriture au début du disque.
                     os.lseek(fd, 0, os.SEEK_SET)
 
+                    block_measurements = []
+                    cycle_write_measurements.append(block_measurements)
+
                     written, write_time = self._write_cycle(
                         fd,
                         write_buffer,
                         cycle,
+                        writer,
                         self._get_elapsed,
                         self._emit_progress,
+                        block_measurements,
                     )
 
                     # Cumuler les octets et le temps d'E/S.
                     total_written += written
                     write_io_time += write_time
-
-                    # Enregistrer le débit moyen de cette phase.
-                    if write_time > 0:
-                        cycle_write_speeds.append(
-                            compute_mbps(written, write_time)
-                        )
 
                 except Exception as e:
                     io_failed = True
@@ -411,25 +424,24 @@ class TestWorker(QThread):
                     # Relire les données depuis le début du disque.
                     os.lseek(fd, 0, os.SEEK_SET)
 
+                    block_measurements = []
+                    cycle_read_measurements.append(block_measurements)
+
                     read_bytes, read_time, read_errors = self._read_cycle(
                         fd,
                         read_buffer,
                         reference_hash,
                         cycle,
+                        writer,
                         self._get_elapsed,
                         self._emit_progress,
+                        block_measurements,
                     )
 
                     # Cumuler les octets, le temps et les erreurs.
                     total_read += read_bytes
                     read_io_time += read_time
                     errors += read_errors
-
-                    # Enregistrer le débit moyen de cette phase.
-                    if read_time > 0:
-                        cycle_read_speeds.append(
-                            compute_mbps(read_bytes, read_time)
-                        )
 
                 except Exception as e:
                     io_failed = True
@@ -448,8 +460,8 @@ class TestWorker(QThread):
             total_read,
             write_io_time,
             read_io_time,
-            cycle_write_speeds,
-            cycle_read_speeds,
+            cycle_write_measurements,
+            cycle_read_measurements,
             errors,
             io_failed,
         )
@@ -484,8 +496,10 @@ class TestWorker(QThread):
         fd,
         buffer,
         cycle,
+        writer,
         elapsed,
         emit_progress,
+        block_measurements,
     ):
         """
         Écrit séquentiellement les blocs sur le périphérique avec O_DIRECT.
@@ -527,7 +541,20 @@ class TestWorker(QThread):
             io_time += duration
 
             mbps = compute_mbps(written, duration)
+            block_measurements.append((written, duration))
+
             rel = elapsed()
+
+            # ENREGISTREMENT DES MESURES
+            writer.writerow([
+                cycle,
+                "WRITE",
+                block_number,
+                BLOCK_SIZE,
+                duration,
+                mbps,
+                1,
+            ])
 
             self.sample.emit("WRITE", rel, mbps)
             emit_progress("write", block_number)
@@ -554,8 +581,10 @@ class TestWorker(QThread):
         buffer,
         reference_hash,
         cycle,
+        writer,
         elapsed,
         emit_progress,
+        block_measurements,
     ):
         """
         Lit séquentiellement les blocs et vérifie leur intégrité.
@@ -598,6 +627,7 @@ class TestWorker(QThread):
             io_time += duration
 
             mbps = compute_mbps(n, duration)
+            block_measurements.append((n, duration))
 
             # VÉRIFICATION DE L'INTÉGRITÉ
             # Le calcul SHA-256 reste hors du chronométrage des E/S.
@@ -613,6 +643,16 @@ class TestWorker(QThread):
 
             # ENREGISTREMENT DES MESURES
             rel = elapsed()
+
+            writer.writerow([
+                cycle,
+                "READ",
+                block_number,
+                BLOCK_SIZE,
+                duration,
+                mbps,
+                integrity,
+            ])
 
             self.sample.emit("READ", rel, mbps)
             emit_progress("read", block_number)
@@ -667,7 +707,7 @@ class TestWorker(QThread):
     def _evaluate_result(
         self, result, total_written, total_read,
         write_io_time, read_io_time,
-        cycle_write_speeds, cycle_read_speeds,
+        cycle_write_measurements, cycle_read_measurements,
         errors, io_failed
     ):
         """Calcule les statistiques et le verdict PASS/FAIL."""
@@ -689,11 +729,19 @@ class TestWorker(QThread):
             and MIN_READ_MBPS < avg_read < MAX_READ_MBPS
         )
 
+        write_intra = compute_intra_cycle_stats(cycle_write_measurements)
+        read_intra = compute_intra_cycle_stats(cycle_read_measurements)
+
+        write_inter = compute_inter_cycle_stats(cycle_write_measurements)
+        read_inter = compute_inter_cycle_stats(cycle_read_measurements)
+
         result.update({
             "avg_write": avg_write,
             "avg_read": avg_read,
-            "write_stats": compute_speed_stats(cycle_write_speeds),
-            "read_stats": compute_speed_stats(cycle_read_speeds),
+            "write_intra_stats": write_intra,
+            "read_intra_stats": read_intra,
+            "write_inter_stats": write_inter,
+            "read_inter_stats": read_inter,
             "errors": errors,
             "completed": completed,
             "result": "PASS" if passed else "FAIL",
@@ -738,7 +786,7 @@ class TestWorker(QThread):
         self.status.emit("Cancellation: Cleaning up files...")
 
         # Supprimer uniquement les fichiers associés au test courant.
-        for key in ("docx"):
+        for key in ("docx", "csv"):
             path = result.get(key)
 
             if path:

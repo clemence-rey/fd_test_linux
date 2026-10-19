@@ -475,21 +475,85 @@ def compute_mbps(byte_count, duration):
     return byte_count / duration / 1e6
 
 
-def compute_speed_stats(values):
-    """Calcule le nombre de mesures, l'écart-type et le coefficient de variation."""
-    n = len(values)
+def compute_inter_cycle_stats(cycle_measurements):
+    """Calcule la dispersion des débits moyens entre les cycles."""
+
+    cycles = []
+
+    for measurements in cycle_measurements:
+        total_bytes = sum(size for size, duration in measurements)
+        total_time = sum(duration for size, duration in measurements)
+
+        if total_time > 0:
+            cycles.append((
+                compute_mbps(total_bytes, total_time),
+                total_time,
+            ))
+
+    n = len(cycles)
 
     if n < 2:
         return {"n": n, "std": None, "cv": None}
 
-    arr = np.asarray(values, dtype=float)
-    mean = float(arr.mean())
-    std = float(arr.std(ddof=1))
+    total_time = sum(duration for speed, duration in cycles)
+
+    global_mean = sum(
+        speed * duration for speed, duration in cycles
+    ) / total_time
+
+    variance = sum(
+        duration * (speed - global_mean) ** 2
+        for speed, duration in cycles
+    ) / total_time
+
+    std = float(np.sqrt(variance))
 
     return {
         "n": n,
         "std": std,
-        "cv": std / mean * 100 if mean > 0 else None,
+        "cv": std / global_mean * 100 if global_mean > 0 else None,
+    }
+
+
+def compute_intra_cycle_stats(cycle_measurements):
+    """Calcule la dispersion des débits des blocs au sein des cycles."""
+
+    total_bytes = 0
+    total_time = 0.0
+    weighted_variance = 0.0
+    n = 0
+
+    for measurements in cycle_measurements:
+        cycle_bytes = sum(size for size, duration in measurements)
+        cycle_time = sum(duration for size, duration in measurements)
+
+        if cycle_time <= 0:
+            continue
+
+        cycle_mean = compute_mbps(cycle_bytes, cycle_time)
+
+        for size, duration in measurements:
+            if duration <= 0:
+                continue
+
+            speed = compute_mbps(size, duration)
+
+            weighted_variance += duration * (speed - cycle_mean) ** 2
+            n += 1
+
+        total_bytes += cycle_bytes
+        total_time += cycle_time
+
+    if n < 2 or total_time <= 0:
+        return {"n": n, "std": None, "cv": None}
+
+    global_mean = compute_mbps(total_bytes, total_time)
+    std = float(np.sqrt(weighted_variance / total_time))
+
+    return {
+        "n": n,
+        "std": std,
+        "cv": std / global_mean * 100 if global_mean > 0 else None,
     }
 
 # ============================================================
@@ -502,12 +566,15 @@ def create_test_result(devnode):
         "devnode": devnode,
         "model": "N/A",
         "serial": "N/A",
+        "csv": "",
         "docx": "",
         "report": "",
         "avg_write": 0.0,
         "avg_read": 0.0,
-        "write_stats": compute_speed_stats([]),
-        "read_stats": compute_speed_stats([]),
+        "write_inter_stats": compute_inter_cycle_stats([]),
+        "read_inter_stats": compute_inter_cycle_stats([]),
+        "write_intra_stats": compute_intra_cycle_stats([]),
+        "read_intra_stats": compute_intra_cycle_stats([]),
         "errors": 0,
         "error": "",
         "error_code": "",
@@ -578,14 +645,13 @@ def sanitize_filename(text):
 
 
 def create_result_paths(serial):
-    """Construit les chemins des rapports du test USB."""
+    """Construit les chemins des fichiers de résultats du test USB."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tag = f"{stamp}_{sanitize_filename(serial)}"
 
     return {
         "csv": str(RESULTS_DIR / f"USB_test_{tag}.csv"),
-        "graph": str(RESULTS_DIR / f"USB_READ_WRITE_{tag}.png"),
-        "pdf": str(RESULTS_DIR / f"USB_report_{tag}.pdf"),
+        "docx": str(RESULTS_DIR / f"USB_report_{tag}.docx"),
     }
 
 
@@ -647,29 +713,53 @@ def build_report(info, result):
     ]
 
     # Performances
-    for label, avg, stats in (
-        ("Write", result["avg_write"], result["write_stats"]),
-        ("Read", result["avg_read"], result["read_stats"]),
+    for label, avg, intra, inter in (
+        (
+            "Write",
+            result["avg_write"],
+            result["write_intra_stats"],
+            result["write_inter_stats"],
+        ),
+        (
+            "Read",
+            result["avg_read"],
+            result["read_intra_stats"],
+            result["read_inter_stats"],
+        ),
     ):
         lines.append(label)
 
-        if stats["n"] > 0:
-            lines.append(f"  {'Global average':<18}: {avg:8.2f} MB/s")
-        else:
-            lines.append(f"  {'Global average':<18}: N/A")
-
-        if stats["n"] >= 2:
+        if intra["n"] > 0:
             lines.append(
-                f"  {'Std (per cycle) ':<18}: "
-                f"{stats['std']:8.2f} MB/s "
-                f"(n = {stats['n']} cycles)"
+                f"  {'Global average':<22}: {avg:8.2f} MB/s"
+            )
+        else:
+            lines.append(
+                f"  {'Global average':<22}: N/A"
             )
 
-            cv = f"{stats['cv']:8.2f} %" if stats["cv"] is not None else "N/A"
-            lines.append(f"  {'CV (per cycle) ':<18}: {cv}")
+        if intra["std"] is not None:
+            lines.append(
+                f"  {'Intra-cycle STD':<22}: {intra['std']:8.2f} MB/s"
+            )
+            lines.append(
+                f"  {'Intra-cycle CV':<22}: {intra['cv']:8.2f} %"
+            )
         else:
             lines.append(
-                f"  {'Std / CV':<18}: N/A (less than 2 cycles measured)"
+                f"  {'Intra-cycle STD / CV':<22}: N/A"
+            )
+
+        if inter["std"] is not None:
+            lines.append(
+                f"  {'Inter-cycle STD':<22}: {inter['std']:8.2f} MB/s"
+            )
+            lines.append(
+                f"  {'Inter-cycle CV':<22}: {inter['cv']:8.2f} %"
+            )
+        else:
+            lines.append(
+                f"  {'Inter-cycle STD / CV':<22}: N/A"
             )
 
         lines.append("")
@@ -678,7 +768,7 @@ def build_report(info, result):
     lines.extend([
         "=== INTEGRITY ===",
         f"{'Integrity errors ':<20}: "
-        f"{result['errors'] if result['read_stats']['n'] > 0 else 'N/A'}",
+        f"{result['errors'] if result['read_intra_stats']['n'] > 0 else 'N/A'}",
         "",
     ])
 
