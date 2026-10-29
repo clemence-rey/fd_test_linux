@@ -3,3 +3,4 @@ pyudev
 numpy
 matplotlib
 python-docx
+brainstem

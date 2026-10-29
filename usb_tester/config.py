@@ -82,3 +82,11 @@ TEST_LINK_REFS = {
 
 TEST_LINK_FILE = Path(__file__).resolve().parent / "test_link.json"
 MAX_MATING_CYCLES = 1000
+
+
+# ============================================================
+# 7. ACRONAME CONFIGURATION
+# ============================================================
+
+ACRONAME_PORT = 1
+VBUS_SAMPLE_INTERVAL = 0.2  # seconds

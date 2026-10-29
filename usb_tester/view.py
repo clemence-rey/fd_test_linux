@@ -49,6 +49,7 @@ from config import (
 from controller import (
     TestWorker,
     UsbWatcher,
+    VbusWorker
 )
 
 from model import (
@@ -232,6 +233,8 @@ class MainWindow(QMainWindow):
         # Gestion des threads.
         self.worker = None
         self._closing = False
+        self.vbus_worker = None
+        self.vbus_measurements = []
 
         # Initialisation de l'interface.
         self.graph_dirty = False
@@ -313,6 +316,11 @@ class MainWindow(QMainWindow):
         self.dev_status_label.setFont(QFont("Sans", SIZE_TXT_DEV_STATUS))
         self.dev_status_label.setAlignment(Qt.AlignCenter)
         root.addWidget(self.dev_status_label)
+
+        # Live VBUS measurements
+        self.vbus_label = QLabel("VBUS: N/A")
+        self.vbus_label.setAlignment(Qt.AlignCenter)
+        root.addWidget(self.vbus_label)
 
         # --- Informations du périphérique ---
         self.info_text = QPlainTextEdit()
@@ -588,12 +596,29 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.on_worker_finished)
         self.worker.finished.connect(self._on_thread_finished)
 
-        # Démarrage du test.
+        # Start VBUS monitoring
+        self.vbus_measurements = []
+
+        self.vbus_worker = VbusWorker()
+        self.vbus_worker.measurement.connect(self.on_vbus_measurement)
+        self.vbus_worker.error.connect(self.on_vbus_error)
+        self.vbus_worker.start()
+
+        # Start USB performance test
         self.worker.start()
 
 
     def on_test_done(self, r):
         """Traite la fin du test ou son annulation."""
+
+        if self.vbus_worker is not None:
+            self.vbus_worker.stop()
+            self.vbus_worker.wait()
+
+        stats = self.compute_vbus_stats()
+
+        if stats:
+            print("VBUS statistics:", stats)
 
         if r["result"] == "CANCELLED":
             self._go_waiting_insert()
@@ -799,6 +824,19 @@ class MainWindow(QMainWindow):
 
         self.graph_dirty = True
 
+    def on_vbus_measurement(self, voltage, current):
+        """Receive and store VBUS measurements."""
+        self.vbus_measurements.append((voltage, current))
+
+        self.vbus_label.setText(
+            f"VBUS: {voltage:.3f} V | {current:.2f} mA"
+        )
+
+
+    def on_vbus_error(self, message):
+        """Display Acroname monitoring errors."""
+        self.vbus_label.setText(f"VBUS ERROR: {message}")
+
     # --- Finalisation et génération des rapports ---
 
     def _display_final_result(self, r, passed):
@@ -867,6 +905,10 @@ class MainWindow(QMainWindow):
 
         self._closing = True
 
+        if self.vbus_worker is not None and self.vbus_worker.isRunning():
+            self.vbus_worker.stop()
+            self.vbus_worker.wait()
+
         # Arrêt du rafraîchissement graphique.
         self.timer.stop()
 
@@ -884,3 +926,22 @@ class MainWindow(QMainWindow):
 
         # Fermeture lorsque tous les threads sont arrêtés.
         event.accept()
+
+
+    def compute_vbus_stats(self):
+        """Compute minimum, maximum and average VBUS measurements."""
+
+        if not self.vbus_measurements:
+            return None
+
+        voltages = [v for v, i in self.vbus_measurements]
+        currents = [i for v, i in self.vbus_measurements]
+
+        return {
+            "voltage_min": min(voltages),
+            "voltage_max": max(voltages),
+            "voltage_avg": sum(voltages) / len(voltages),
+            "current_min": min(currents),
+            "current_max": max(currents),
+            "current_avg": sum(currents) / len(currents),
+        }

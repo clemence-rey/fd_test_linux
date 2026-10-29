@@ -13,7 +13,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from config import (
     RESULTS_DIR, FILE_SIZE, BLOCK_SIZE, NUMBER_BLOCKS, TEST_DURATION_MODE,
     TEST_CYCLES, TEST_DURATION, MIN_WRITE_MBPS, MIN_READ_MBPS, MAX_READ_MBPS,
-    REFORMAT_FS, REFORMAT_LABEL,
+    REFORMAT_FS, REFORMAT_LABEL, VBUS_SAMPLE_INTERVAL,
 )
 from model import (
     compute_inter_cycle_stats, 
@@ -35,6 +35,8 @@ from model import (
     scan_usb_candidates,
     create_test_result,
 )
+
+from acroname import Acroname
 
 # ============================================================
 # 1. SURVEILLANCE DES PÉRIPHÉRIQUES USB
@@ -145,7 +147,42 @@ class UsbWatcher(QThread):
             self.usb_event.emit(self._current_devnode, "inserted")
 
 # ============================================================
-# 2. EXÉCUTION DES TESTS USB
+# 2. VBUS MEASUREMENTS
+# ============================================================
+
+
+class VbusWorker(QThread):
+    """Continuously monitor VBUS voltage and current."""
+
+    measurement = pyqtSignal(float, float)
+    error = pyqtSignal(str)
+
+    def run(self):
+        """Measure VBUS periodically until interrupted."""
+        acroname = Acroname()
+
+        try:
+            acroname.connect()
+
+            while not self.isInterruptionRequested():
+                voltage, current = acroname.measure_vbus()
+
+                self.measurement.emit(voltage, current)
+
+                self.msleep(int(VBUS_SAMPLE_INTERVAL * 1000))
+
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+        finally:
+            acroname.disconnect()
+
+    def stop(self):
+        """Request monitoring interruption."""
+        self.requestInterruption()
+
+# ============================================================
+# 3. EXÉCUTION DES TESTS USB
 # ============================================================
 
 class TestWorker(QThread):
