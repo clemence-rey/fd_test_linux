@@ -19,6 +19,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Inches
 from datetime import datetime
+
 from config import (
     USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, 
     MIN_READ_MBPS, MAX_READ_MBPS, TEST_LINK_FILE, 
@@ -556,6 +557,37 @@ def compute_intra_cycle_stats(cycle_measurements):
         "cv": std / global_mean * 100 if global_mean > 0 else None,
     }
 
+def compute_vbus_stats(measurements):
+    """Compute VBUS voltage and current statistics for each test phase."""
+
+    stats = {}
+
+    for phase in ("IDLE", "WRITE", "READ"):
+
+        samples = [
+            (voltage, current)
+            for sample_phase, voltage, current in measurements
+            if sample_phase == phase
+        ]
+
+        if not samples:
+            stats[phase] = None
+            continue
+
+        voltages = [voltage for voltage, current in samples]
+        currents = [current for voltage, current in samples]
+
+        stats[phase] = {
+            "voltage_min": min(voltages),
+            "voltage_avg": sum(voltages) / len(voltages),
+            "voltage_max": max(voltages),
+            "current_min": min(currents),
+            "current_avg": sum(currents) / len(currents),
+            "current_max": max(currents),
+        }
+
+    return stats
+
 # ============================================================
 # 7. GESTION DES RÉSULTATS ET DES ERREURS
 # ============================================================
@@ -771,6 +803,31 @@ def build_report(info, result):
         f"{result['errors'] if result['read_intra_stats']['n'] > 0 else 'N/A'}",
         "",
     ])
+
+    # VBUS measurements
+    lines.extend([
+        "=== VBUS MEASUREMENTS ===",
+        "",
+    ])
+
+    for phase, stats in result.get("vbus_stats", {}).items():
+
+        lines.append(phase)
+
+        if stats is None:
+            lines.append("  No measurements available")
+
+        else:
+            lines.extend([
+                f"  Voltage min : {stats['voltage_min']:.3f} V",
+                f"  Voltage avg : {stats['voltage_avg']:.3f} V",
+                f"  Voltage max : {stats['voltage_max']:.3f} V",
+                f"  Current min : {stats['current_min']:.2f} mA",
+                f"  Current avg : {stats['current_avg']:.2f} mA",
+                f"  Current max : {stats['current_max']:.2f} mA",
+            ])
+
+        lines.append("")
 
     # Reformatage
     lines.extend([

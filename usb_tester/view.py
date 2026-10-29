@@ -61,6 +61,8 @@ from model import (
     write_docx_report,
     increment_test_link_counter,
     load_test_link_counters,
+    compute_vbus_stats,
+    build_report,
 )
 
 # ============================================================
@@ -229,6 +231,7 @@ class MainWindow(QMainWindow):
         self.state = WAITING_INSERT
         self._waiting_for_removal = False
         self.current_info = ""
+        self.current_phase = "IDLE"
 
         # Gestion des threads.
         self.worker = None
@@ -584,6 +587,7 @@ class MainWindow(QMainWindow):
 
         # Création du thread de test.
         self.worker = TestWorker(self.current_devnode, self.current_diskseq)
+        self.worker.phase_changed.connect(self.on_phase_changed)
 
         # Communication entre le worker et l'interface.
         self.worker.status.connect(self._set_steps_status)
@@ -607,6 +611,9 @@ class MainWindow(QMainWindow):
         # Start USB performance test
         self.worker.start()
 
+    def on_phase_changed(self, phase):
+        """Update the current USB test phase."""
+        self.current_phase = phase
 
     def on_test_done(self, r):
         """Traite la fin du test ou son annulation."""
@@ -615,7 +622,12 @@ class MainWindow(QMainWindow):
             self.vbus_worker.stop()
             self.vbus_worker.wait()
 
-        stats = self.compute_vbus_stats()
+        stats = compute_vbus_stats(self.vbus_measurements)
+        r["vbus_stats"] = stats
+
+        if r["result"] not in ("CANCELLED", "CANCEL_FAILED"):
+            info = get_device_info(r["devnode"])
+            r["report"] = build_report(info, r)
 
         if stats:
             print("VBUS statistics:", stats)
@@ -825,11 +837,15 @@ class MainWindow(QMainWindow):
         self.graph_dirty = True
 
     def on_vbus_measurement(self, voltage, current):
-        """Receive and store VBUS measurements."""
-        self.vbus_measurements.append((voltage, current))
+        """Store VBUS measurements with their corresponding test phase."""
+
+        self.vbus_measurements.append(
+            (self.current_phase, voltage, current)
+        )
 
         self.vbus_label.setText(
-            f"VBUS: {voltage:.3f} V | {current:.2f} mA"
+            f"VBUS [{self.current_phase}]: "
+            f"{voltage:.3f} V | {current:.2f} mA"
         )
 
 
@@ -927,21 +943,3 @@ class MainWindow(QMainWindow):
         # Fermeture lorsque tous les threads sont arrêtés.
         event.accept()
 
-
-    def compute_vbus_stats(self):
-        """Compute minimum, maximum and average VBUS measurements."""
-
-        if not self.vbus_measurements:
-            return None
-
-        voltages = [v for v, i in self.vbus_measurements]
-        currents = [i for v, i in self.vbus_measurements]
-
-        return {
-            "voltage_min": min(voltages),
-            "voltage_max": max(voltages),
-            "voltage_avg": sum(voltages) / len(voltages),
-            "current_min": min(currents),
-            "current_max": max(currents),
-            "current_avg": sum(currents) / len(currents),
-        }

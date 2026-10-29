@@ -193,6 +193,7 @@ class TestWorker(QThread):
     sample = pyqtSignal(str, float, float)  # op, temps (s), MB/s
     progress = pyqtSignal(int)
     test_done = pyqtSignal(dict)
+    phase_changed = pyqtSignal(str)
 
     # --- Initialisation et contrôle du thread ---
 
@@ -306,6 +307,7 @@ class TestWorker(QThread):
         Les E/S sont réalisées directement sur le périphérique avec O_DIRECT.
         """
         devnode = self.devnode
+        self.phase_changed.emit("IDLE")
 
         # IDENTIFICATION ET PRÉPARATION DU PÉRIPHÉRIQUE
 
@@ -418,6 +420,7 @@ class TestWorker(QThread):
                 # 3.1 ÉCRITURE
 
                 self.status.emit(f"Cycle {label_cycle} - WRITE")
+                self.phase_changed.emit("WRITE")
 
                 try:
                     # Recommencer l'écriture au début du disque.
@@ -456,6 +459,7 @@ class TestWorker(QThread):
                 # 3.2 LECTURE ET VÉRIFICATION D'INTÉGRITÉ
 
                 self.status.emit(f"Cycle {label_cycle} - READ")
+                self.phase_changed.emit("READ")
 
                 try:
                     # Relire les données depuis le début du disque.
@@ -483,6 +487,8 @@ class TestWorker(QThread):
                 except Exception as e:
                     io_failed = True
                     set_result_error(result, e, "Read")
+
+        self.phase_changed.emit("IDLE")
 
         # ANNULATION VOLONTAIRE
         # Les fichiers et le périphérique brut sont maintenant fermés.
