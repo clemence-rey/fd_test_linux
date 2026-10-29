@@ -14,7 +14,7 @@ SOFTWARE_VERSION = "1.0"
 
 
 # Port USB réservé au banc de qualification
-USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1"
+USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1.1"
 
 # ============================================================
 # 1. CONFIGURATION DU TEST
@@ -22,7 +22,7 @@ USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1"
 
 # Mode d'arrêt : "cycles" ou "duration"
 TEST_DURATION_MODE = "cycles"
-TEST_CYCLES = 2                 # Nombre de cycles écriture + lecture
+TEST_CYCLES = 2                # Nombre de cycles écriture + lecture
 TEST_DURATION_MIN = 0.5        # Durée du test en minutes
 
 # Taille des données
@@ -34,7 +34,7 @@ BLOCK_SIZE_MB = 4              # Taille d'un bloc d'E/S (MB)
 # 2. CRITÈRES DE QUALIFICATION (PASS / FAIL)
 # ============================================================
 
-MIN_WRITE_MBPS = 80.0         # Débit minimal en écriture (MB/s)
+MIN_WRITE_MBPS = 80.0          # Débit minimal en écriture (MB/s)
 MIN_READ_MBPS = 160.0          # Débit minimal en lecture (MB/s)
 MAX_READ_MBPS = 500.0          # Débit maximal en lecture (MB/s)
 
@@ -44,7 +44,7 @@ MAX_READ_MBPS = 500.0          # Débit maximal en lecture (MB/s)
 # ============================================================
 
 REFORMAT_FS = "fat32"          # "fat32", "exfat" ou "ntfs"
-REFORMAT_LABEL = "FISCHER FLASH DRIVE"     # Nom du volume après reformatage
+REFORMAT_LABEL = "FISCHER"     # Nom du volume après reformatage
 
 
 # ============================================================
