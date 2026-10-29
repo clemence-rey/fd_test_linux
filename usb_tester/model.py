@@ -20,6 +20,10 @@ from docx import Document
 from docx.shared import Inches
 from datetime import datetime
 
+from bisect import bisect_right
+from dataclasses import dataclass
+from enum import Enum
+
 from config import (
     USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, 
     MIN_READ_MBPS, MAX_READ_MBPS, TEST_LINK_FILE, 
@@ -466,6 +470,35 @@ def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
         )
 
 # ============================================================
+# DOMAIN VALUES
+# ============================================================
+
+class TestPhase(str, Enum):
+    """Electrical measurement phases used during the USB test."""
+
+    IDLE = "IDLE"
+    WRITE = "WRITE"
+    READ = "READ"
+    OTHER = "OTHER"
+
+
+@dataclass(frozen=True)
+class PhaseEvent:
+    """Timestamped transition to a new test phase."""
+
+    timestamp_ns: int
+    phase: TestPhase
+
+
+@dataclass(frozen=True)
+class VbusSample:
+    """One timestamped VBUS measurement."""
+
+    timestamp_ns: int
+    voltage_v: float
+    current_ma: float
+
+# ============================================================
 # 6. CALCULS ET STATISTIQUES
 # ============================================================
 
@@ -557,27 +590,94 @@ def compute_intra_cycle_stats(cycle_measurements):
         "cv": std / global_mean * 100 if global_mean > 0 else None,
     }
 
-def compute_vbus_stats(measurements):
-    """Compute VBUS voltage and current statistics for each test phase."""
+def _empty_vbus_stats():
+    """Return an empty but structurally complete VBUS result."""
 
-    stats = {}
+    return {
+        "n": 0,
+        "voltage_min": None,
+        "voltage_avg": None,
+        "voltage_max": None,
+        "current_min": None,
+        "current_avg": None,
+        "current_max": None,
+    }
 
-    for phase in ("IDLE", "WRITE", "READ"):
 
-        samples = [
-            (voltage, current)
-            for sample_phase, voltage, current in measurements
-            if sample_phase == phase
-        ]
+def compute_vbus_phase_stats(samples, phase_events):
+    """
+    Compute min/average/max voltage and current for IDLE, WRITE and READ.
 
-        if not samples:
-            stats[phase] = None
+    Samples are assigned using timestamped phase transitions.
+    Samples acquired during OTHER are ignored.
+    """
+
+    phase_names = (
+        TestPhase.IDLE.value,
+        TestPhase.WRITE.value,
+        TestPhase.READ.value,
+    )
+
+    grouped = {
+        phase_name: []
+        for phase_name in phase_names
+    }
+
+    ordered_events = sorted(
+        phase_events,
+        key=lambda event: event.timestamp_ns,
+    )
+
+    if not ordered_events:
+        return {
+            phase_name: _empty_vbus_stats()
+            for phase_name in phase_names
+        }
+
+    event_times = [
+        event.timestamp_ns
+        for event in ordered_events
+    ]
+
+    for sample in sorted(samples, key=lambda item: item.timestamp_ns):
+        event_index = bisect_right(
+            event_times,
+            sample.timestamp_ns,
+        ) - 1
+
+        # No phase had started when this sample was acquired.
+        if event_index < 0:
             continue
 
-        voltages = [voltage for voltage, current in samples]
-        currents = [current for voltage, current in samples]
+        phase = ordered_events[event_index].phase
 
-        stats[phase] = {
+        if isinstance(phase, TestPhase):
+            phase_name = phase.value
+        else:
+            phase_name = str(phase)
+
+        if phase_name in grouped:
+            grouped[phase_name].append(sample)
+
+    statistics = {}
+
+    for phase_name, phase_samples in grouped.items():
+        if not phase_samples:
+            statistics[phase_name] = _empty_vbus_stats()
+            continue
+
+        voltages = [
+            sample.voltage_v
+            for sample in phase_samples
+        ]
+
+        currents = [
+            sample.current_ma
+            for sample in phase_samples
+        ]
+
+        statistics[phase_name] = {
+            "n": len(phase_samples),
             "voltage_min": min(voltages),
             "voltage_avg": sum(voltages) / len(voltages),
             "voltage_max": max(voltages),
@@ -586,7 +686,7 @@ def compute_vbus_stats(measurements):
             "current_max": max(currents),
         }
 
-    return stats
+    return statistics
 
 # ============================================================
 # 7. GESTION DES RÉSULTATS ET DES ERREURS
@@ -665,6 +765,62 @@ def set_result_error(result, exc, operation=""):
     result["error_detail"] = error["detail"]
     result["result"] = "FAIL"
     result["completed"] = False
+
+
+# ============================================================
+# 8. PASS/FAIL CRITERIA EVALUATION
+# ============================================================
+
+
+def evaluate_usb_test(
+    total_written,
+    total_read,
+    write_io_time,
+    read_io_time,
+    cycle_write_measurements,
+    cycle_read_measurements,
+    integrity_errors,
+    interrupted,
+    io_failed,
+):
+    """Calculate USB performance statistics and final qualification result."""
+
+    avg_write = compute_mbps(total_written, write_io_time)
+    avg_read = compute_mbps(total_read, read_io_time)
+
+    completed = (
+        not interrupted
+        and not io_failed
+        and total_written > 0
+        and total_read > 0
+    )
+
+    passed = (
+        completed
+        and integrity_errors == 0
+        and avg_write > MIN_WRITE_MBPS
+        and MIN_READ_MBPS < avg_read < MAX_READ_MBPS
+    )
+
+    return {
+        "avg_write": avg_write,
+        "avg_read": avg_read,
+        "write_intra_stats": compute_intra_cycle_stats(
+            cycle_write_measurements
+        ),
+        "read_intra_stats": compute_intra_cycle_stats(
+            cycle_read_measurements
+        ),
+        "write_inter_stats": compute_inter_cycle_stats(
+            cycle_write_measurements
+        ),
+        "read_inter_stats": compute_inter_cycle_stats(
+            cycle_read_measurements
+        ),
+        "errors": integrity_errors,
+        "completed": completed,
+        "result": "PASS" if passed else "FAIL",
+    }
 
 # ============================================================
 # 8. GÉNÉRATION DES RAPPORTS

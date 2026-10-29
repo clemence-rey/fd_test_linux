@@ -61,7 +61,6 @@ from model import (
     write_docx_report,
     increment_test_link_counter,
     load_test_link_counters,
-    compute_vbus_stats,
     build_report,
 )
 
@@ -621,16 +620,6 @@ class MainWindow(QMainWindow):
         if self.vbus_worker is not None:
             self.vbus_worker.stop()
             self.vbus_worker.wait()
-
-        stats = compute_vbus_stats(self.vbus_measurements)
-        r["vbus_stats"] = stats
-
-        if r["result"] not in ("CANCELLED", "CANCEL_FAILED"):
-            info = get_device_info(r["devnode"])
-            r["report"] = build_report(info, r)
-
-        if stats:
-            print("VBUS statistics:", stats)
 
         if r["result"] == "CANCELLED":
             self._go_waiting_insert()

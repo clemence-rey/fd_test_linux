@@ -34,6 +34,7 @@ from model import (
     build_report, 
     scan_usb_candidates,
     create_test_result,
+    evaluate_usb_test,
 )
 
 from acroname import Acroname
@@ -497,16 +498,18 @@ class TestWorker(QThread):
 
         # CALCUL DES STATISTIQUES ET DU VERDICT
 
-        self._evaluate_result(
-            result,
-            total_written,
-            total_read,
-            write_io_time,
-            read_io_time,
-            cycle_write_measurements,
-            cycle_read_measurements,
-            errors,
-            io_failed,
+        result.update(
+            evaluate_usb_test(
+                total_written=total_written,
+                total_read=total_read,
+                write_io_time=write_io_time,
+                read_io_time=read_io_time,
+                cycle_write_measurements=cycle_write_measurements,
+                cycle_read_measurements=cycle_read_measurements,
+                integrity_errors=errors,
+                interrupted=self.isInterruptionRequested(),
+                io_failed=io_failed,
+            )
         )
 
         # GESTION DES INTERRUPTIONS ET DES ERREURS D'E/S
@@ -745,50 +748,6 @@ class TestWorker(QThread):
             self._last_pct = pct
             self.progress.emit(pct)
 
-    # --- Évaluation des résultats ---
-
-    def _evaluate_result(
-        self, result, total_written, total_read,
-        write_io_time, read_io_time,
-        cycle_write_measurements, cycle_read_measurements,
-        errors, io_failed
-    ):
-        """Calcule les statistiques et le verdict PASS/FAIL."""
-
-        avg_write = compute_mbps(total_written, write_io_time)
-        avg_read = compute_mbps(total_read, read_io_time)
-
-        completed = (
-            not self.isInterruptionRequested()
-            and not io_failed
-            and total_written > 0
-            and total_read > 0
-        )
-
-        passed = (
-            completed
-            and errors == 0
-            and avg_write > MIN_WRITE_MBPS
-            and MIN_READ_MBPS < avg_read < MAX_READ_MBPS
-        )
-
-        write_intra = compute_intra_cycle_stats(cycle_write_measurements)
-        read_intra = compute_intra_cycle_stats(cycle_read_measurements)
-
-        write_inter = compute_inter_cycle_stats(cycle_write_measurements)
-        read_inter = compute_inter_cycle_stats(cycle_read_measurements)
-
-        result.update({
-            "avg_write": avg_write,
-            "avg_read": avg_read,
-            "write_intra_stats": write_intra,
-            "read_intra_stats": read_intra,
-            "write_inter_stats": write_inter,
-            "read_inter_stats": read_inter,
-            "errors": errors,
-            "completed": completed,
-            "result": "PASS" if passed else "FAIL",
-        })
 
     # --- Reformatage et annulation ---
 
