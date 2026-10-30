@@ -10,6 +10,7 @@ import os
 from PyQt5.QtWidgets import QApplication, QDialog
 
 from view import MainWindow, TestSetupDialog
+from controller import AppController
 
 # ============================================================
 # 1. GESTION DES PRIVILÈGES
@@ -57,11 +58,19 @@ def main():
     test_config = setup.get_configuration()
 
     # Création et affichage de la fenêtre principale.
-    win = MainWindow(test_config)
-    win.show()
+    view = MainWindow(test_config)
 
-    # Exécution de la boucle d'événements Qt.
+    controller = AppController(
+        view=view,
+        test_config=test_config,
+        parent=app,
+    )
+
+    view.show()
+    controller.start()
+
     sys.exit(app.exec_())
+
 
 
 if __name__ == "__main__":

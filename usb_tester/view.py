@@ -1,9 +1,8 @@
 """Interface graphique du testeur USB : affichage, suivi du test et rapports."""
 
 import numpy as np
-from datetime import datetime
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 
 from PyQt5.QtWidgets import (
@@ -30,39 +29,13 @@ from matplotlib.backends.backend_qt5agg import (
 )
 
 from config import (
-    RESULTS_DIR,
     TEST_FILE_SIZE_MB,
     BLOCK_SIZE_MB,
     MIN_WRITE_MBPS,
     MIN_READ_MBPS,
-    TEMPLATE_PATH,
-    STATION_NAME,
-    SOFTWARE_VERSION,
-    TEST_DURATION_MODE,
-    TEST_DURATION,
-    TEST_CYCLES,
-    REFORMAT_FS,
     TEST_LINK_REFS,
-    MAX_MATING_CYCLES,
 )
 
-from controller import (
-    TestWorker,
-    UsbWatcher,
-    VbusWorker
-)
-
-from model import (
-    get_diskseq,
-    get_device_info,
-    format_device_info,
-    assert_same_device,
-    assert_test_port,
-    write_docx_report,
-    increment_test_link_counter,
-    load_test_link_counters,
-    build_report,
-)
 
 # ============================================================
 # 1. CONSTANTES DE L'INTERFACE
@@ -210,6 +183,11 @@ class TestSetupDialog(QDialog):
 class MainWindow(QMainWindow):
     """Gère la GUI, les événements USB et l'affichage des résultats."""
 
+    start_requested = pyqtSignal()
+    cancel_requested = pyqtSignal()
+    restart_requested = pyqtSignal()
+    close_requested = pyqtSignal()
+
     # --- Initialisation de l'interface ---
 
     def __init__(self, test_config):
@@ -221,22 +199,15 @@ class MainWindow(QMainWindow):
         self.setWindowState(self.windowState() | Qt.WindowMaximized)
 
         # Périphérique USB et état de l'application.
-        self.current_devnode = None
-        self.current_diskseq = None
-        self.connected_devnode = None
-        self.connected_diskseq = None
-        self._device_removed = False
-        self._new_device_ready = False
-        self.state = WAITING_INSERT
-        self._waiting_for_removal = False
         self.current_info = ""
         self.current_phase = "IDLE"
 
         # Gestion des threads.
-        self.worker = None
         self._closing = False
-        self.vbus_worker = None
         self.vbus_measurements = []
+
+        self.test_link_header = ""
+        self._close_allowed = False
 
         # Initialisation de l'interface.
         self.graph_dirty = False
@@ -250,12 +221,6 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh_graph)
         self.timer.start(300)
-
-        # Surveillance des périphériques USB.
-        self.watcher = UsbWatcher()
-        self.watcher.finished.connect(self._on_thread_finished)
-        self.watcher.usb_event.connect(self.on_usb_event)
-        self.watcher.start()
 
 
     def _build_ui(self):
@@ -343,355 +308,6 @@ class MainWindow(QMainWindow):
         splitter.setSizes([300, 750])
         root.addWidget(splitter, 1)
 
-    # --- Gestion des états de l'interface ---
-
-    def _go_ready(self, devnode, diskseq):
-        """Vérifie la clé détectée et prépare l'interface pour le test."""
-
-        try:
-            assert_test_port(devnode)
-
-            if diskseq is None:
-                raise RuntimeError("USB ID not available")
-
-            actual_diskseq = get_diskseq(devnode)
-
-            if actual_diskseq is None or actual_diskseq != diskseq:
-                raise RuntimeError("The USB flash drive changed while it was being detected")
-
-            info = get_device_info(devnode)
-
-            # Vérifie que la clé n'a pas changé pendant la lecture des informations.
-            assert_same_device(devnode, diskseq)
-
-        except (OSError, RuntimeError) as exc:
-            self._go_waiting_insert()
-            self._set_steps_status(f"USB detection failed : {exc}")
-            return
-
-        self.state = READY
-        self.current_devnode = devnode
-        self.current_diskseq = actual_diskseq
-
-        self.progress.setValue(0)
-        self._set_banner(TXT_READY, COLORS["wait"])
-        self._set_user_status(self._get_device_label(info))
-        self._set_steps_status("Flash drive detected, waiting for START")
-        self._render_info(format_device_info(info))
-
-        self.start_button.setEnabled(True)
-
-
-    def _go_waiting_insert(self):
-        """Réinitialise l'interface et attend une nouvelle insertion USB."""
-
-        self.state = WAITING_INSERT
-
-        # Réinitialisation du périphérique associé au test.
-        self.current_devnode = None
-        self.current_diskseq = None
-
-        # Réinitialisation de l'affichage.
-        self._reset_view()
-
-        # Configuration de l'interface en attente d'insertion.
-        self.start_button.setEnabled(False)
-        self.button_stack.setCurrentWidget(self.start_button)
-
-        self._set_banner(TXT_INSERT, COLORS["wait"])
-        self._set_user_status("")
-
-    # --- Gestion des événements utilisateur ---
-
-    def on_start_clicked(self):
-        """Démarre le test uniquement si le périphérique est toujours valide."""
-
-        if self.state != READY or self.current_devnode is None:
-            return
-
-        try:
-            assert_test_port(self.current_devnode)
-            assert_same_device(self.current_devnode, self.current_diskseq)
-
-        except (OSError, RuntimeError) as exc:
-            self._go_waiting_insert()
-            self._set_steps_status(f"Invalid device: {exc}")
-            return
-
-        self.start_button.setEnabled(False)
-
-        try:
-            self.start_test(self.current_devnode)
-
-        except (OSError, RuntimeError) as exc:
-            self._go_waiting_insert()
-            self._set_steps_status(f"Unable to start: {exc}")
-
-
-    def on_cancel_clicked(self):
-        """Demande l'annulation volontaire du test USB."""
-
-        if self.state != TESTING:
-            return
-
-        if self.worker is None or not self.worker.isRunning():
-            return
-
-        # Empêcher les demandes d'annulation répétées.
-        self.cancel_button.setEnabled(False)
-
-        # Informer l'opérateur.
-        self._set_banner("Cancellation in progress...", COLORS["test"])
-        self._set_user_status("Do not unplug the flash drive.")
-        self._set_steps_status("Stopping test operations...")
-
-        # Demander l'arrêt du worker.
-        self.worker.cancel()
-
-
-    def on_restart_clicked(self):
-        """Réinitialise l'interface et attend une nouvelle insertion USB."""
-
-        if self.state != WAITING_RESTART:
-            return
-
-        if self.worker is not None and self.worker.isRunning():
-            return
-
-        # Check whether a remove/add sequence occurred.
-        device_ready = (
-            self._new_device_ready
-            and self.connected_devnode is not None
-            and self.connected_diskseq is not None
-        )
-
-        devnode = self.connected_devnode
-        diskseq = self.connected_diskseq
-
-        # Reset the GUI and detection flags.
-        self._go_waiting_insert()
-
-        self._device_removed = False
-        self._new_device_ready = False
-
-        if device_ready:
-            self._go_ready(devnode, diskseq)
-        elif devnode is not None:
-            self._waiting_for_removal = True
-
-    # --- Surveillance des périphériques USB ---
-
-    def on_usb_event(self, devnode, event):
-        """Traite les connexions et déconnexions du port réservé."""
-
-        if event == "inserted":  
-            try:
-                assert_test_port(devnode)
-                diskseq = get_diskseq(devnode)
-
-                if self._waiting_for_removal:
-                    return
-
-                if diskseq is None:
-                    raise RuntimeError("Unable to recover the DiskSeq")
-
-            except (OSError, RuntimeError) as exc:
-                self._set_steps_status(f"Device unavailable : {exc}")
-                return
-
-            # Identifier une nouvelle détection USB.
-            is_new_device = (
-                self.connected_devnode,
-                self.connected_diskseq,
-            ) != (devnode, diskseq)
-
-            self.connected_devnode = devnode
-            self.connected_diskseq = diskseq
-
-            if self.state == WAITING_RESTART and self._device_removed:
-                self._new_device_ready = True
-
-            # Compter les insertions indépendamment de l'état de la GUI.
-            if is_new_device:
-                try:
-                    test_link = self.test_config["test_link"]
-                    increment_test_link_counter(test_link)
-                    self._render_info(self.current_info)
-
-                except (OSError, ValueError, TypeError) as exc:
-                    self._set_steps_status(f"Counter error : {exc}")
-
-            # Préparer un test uniquement lorsque la GUI le permet.
-            if self.state in (WAITING_INSERT, READY):
-                if (self.current_devnode, self.current_diskseq) != (devnode, diskseq):
-                    self._go_ready(devnode, diskseq)
-
-        elif event == "removed":
-            if devnode != self.connected_devnode:
-                return
-
-            self.connected_devnode = None
-            self.connected_diskseq = None
-            self._waiting_for_removal = False
-
-            if self.state == TESTING:
-                if self.worker is not None and self.worker.isRunning():
-                    self.worker.abort()
-
-            elif self.state == READY:
-                self._go_waiting_insert()
-
-            if self.state == WAITING_RESTART:
-                self._device_removed = True
-                self._new_device_ready = False
-
-            # En WAITING_RESTART, conserver le rapport affiché.
-
-
-    def _get_device_label(self, info):
-        """Construit le libellé du périphérique à partir du fabricant et du modèle."""
-        manufacturer = str(info.get("Manufacturer") or "N/A").strip()
-        model = str(info.get("Model") or "N/A").strip()
-
-        return " - ".join(
-            x for x in (manufacturer, model) if x and x != "N/A"
-        )
-
-    # --- Gestion du test et des threads ---
-
-    def start_test(self, devnode):
-        """Prépare l'interface et démarre le thread de test USB."""
-
-        self._device_removed = False
-        self._new_device_ready = False
-
-        # Vérification du périphérique avant le test destructif.
-        if self.current_diskseq is None:
-            raise RuntimeError("Flash drive identity not initialized")
-
-        assert_test_port(devnode)
-        assert_same_device(devnode, self.current_diskseq)
-
-        # Passage à l'état TESTING.
-        self.state = TESTING
-        self.current_devnode = devnode
-
-        # Réinitialisation de l'interface.
-        self._reset_view()
-
-        self._set_banner(TXT_TESTING, COLORS["test"])
-        self._set_user_status(TXT_DO_NOT_UNPLUG)
-        self.button_stack.setCurrentWidget(self.cancel_button)
-        self.cancel_button.setEnabled(True)
-
-        # Création du thread de test.
-        self.worker = TestWorker(self.current_devnode, self.current_diskseq)
-        self.worker.phase_changed.connect(self.on_phase_changed)
-
-        # Communication entre le worker et l'interface.
-        self.worker.status.connect(self._set_steps_status)
-        self.worker.info_ready.connect(self._render_info)
-        self.worker.sample.connect(self.on_sample)
-        self.worker.progress.connect(self.progress.setValue)
-        self.worker.test_done.connect(self.on_test_done)
-
-        # Gestion de la terminaison du thread.
-        self.worker.finished.connect(self.on_worker_finished)
-        self.worker.finished.connect(self._on_thread_finished)
-
-        # Start VBUS monitoring
-        self.vbus_measurements = []
-
-        self.vbus_worker = VbusWorker()
-        self.vbus_worker.measurement.connect(self.on_vbus_measurement)
-        self.vbus_worker.error.connect(self.on_vbus_error)
-        self.vbus_worker.start()
-
-        # Start USB performance test
-        self.worker.start()
-
-    def on_phase_changed(self, phase):
-        """Update the current USB test phase."""
-        self.current_phase = phase
-
-    def on_test_done(self, r):
-        """Traite la fin du test ou son annulation."""
-
-        if self.vbus_worker is not None:
-            self.vbus_worker.stop()
-            self.vbus_worker.wait()
-
-        if r["result"] == "CANCELLED":
-            self._go_waiting_insert()
-            return
-
-        if r["result"] == "CANCEL_FAILED":
-            self.state = WAITING_RESTART
-
-            self._set_banner(
-                "Cancellation failed",
-                COLORS["fail"]
-            )
-
-            self._set_user_status(
-                "The flash drive could not be restored."
-            )
-
-            self._set_steps_status(r.get("error", "Unknown error"))
-
-            self.button_stack.setCurrentWidget(self.restart_button)
-            return
-    
-        # Actualisation du graphique avec les dernières mesures.
-        self._refresh_graph()
-
-        # Ajout des vitesses moyennes.
-        if r.get("avg_write") is not None:
-            self.ax.axhline(
-                r["avg_write"],
-                linestyle="--",
-                alpha=0.5,
-                color="C0",
-                label=f"Average Write {r['avg_write']:.1f} MB/s"
-            )
-
-        if r.get("avg_read") is not None:
-            self.ax.axhline(
-                r["avg_read"],
-                linestyle="--",
-                alpha=0.5,
-                color="C1",
-                label=f"Average Read {r['avg_read']:.1f} MB/s"
-            )
-
-        self.ax.legend(loc="lower left")
-        self.canvas.draw()
-
-        # Affichage du rapport complet.
-        passed = r["result"] == "PASS"
-        self._render_info(r.get("report") or self.current_info)
-
-        # Génération du docx à la prochaine itération de la boucle Qt.
-        self._set_steps_status("Generating report...")
-        QTimer.singleShot(0, lambda: self._display_final_result(r, passed))
-
-
-    def on_worker_finished(self):
-        """Planifie la destruction du worker après la fin du thread."""
-        worker = self.sender()
-
-        if worker is not None:
-            worker.deleteLater()
-
-        if self.worker is worker:
-            self.worker = None
-
-
-    def _on_thread_finished(self):
-        """Réessaie de fermer la fenêtre après l'arrêt d'un thread."""
-        if self._closing:
-            QTimer.singleShot(0, self.close)
-
     # --- Affichage des statuts et informations ---
 
     def _set_banner(self, title, color):
@@ -716,23 +332,8 @@ class MainWindow(QMainWindow):
 
 
     def _render_info(self, text):
-        """Affiche les informations du test link et du test courant."""
-
-        test_link = self.test_config["test_link"]
-        counters = load_test_link_counters()
-
-        link_data = counters.get(test_link, {})
-        cycles = link_data.get("cycles", 0)
-        max_cycles = link_data.get("max_cycles", MAX_MATING_CYCLES)
-
-        header = (
-            "=== TEST-LINK ===\n"
-            f"Reference : {test_link}\n"
-            f"Mating cycle : {cycles} / {max_cycles}"
-        )
-
-        self.current_info = text
-        self.info_text.setPlainText(f"{header}\n\n{text}")
+        """Display the text supplied by the Controller."""
+        self.set_result_text(text)
 
 
     def _reset_view(self):
@@ -825,110 +426,205 @@ class MainWindow(QMainWindow):
 
         self.graph_dirty = True
 
-    def on_vbus_measurement(self, voltage, current):
-        """Store VBUS measurements with their corresponding test phase."""
 
-        self.vbus_measurements.append(
-            (self.current_phase, voltage, current)
+    def on_start_clicked(self):
+        """Notify the Controller that START was requested."""
+        self.start_requested.emit()
+
+
+    def on_cancel_clicked(self):
+        """Notify the Controller that cancellation was requested."""
+        self.cancel_requested.emit()
+
+
+    def on_restart_clicked(self):
+        """Notify the Controller that a new test was requested."""
+        self.restart_requested.emit()
+
+    def get_report_figure(self):
+        """Return the graph used in the final report."""
+
+        return self.figure
+
+    def allow_close(self):
+        """Permit the final window close."""
+
+        self._close_allowed = True
+        self.close()
+
+    def closeEvent(self, event):
+        """Delegate shutdown to the controller."""
+
+        if self._close_allowed:
+            self.timer.stop()
+            event.accept()
+            return
+
+        event.ignore()
+        self.close_requested.emit()
+
+    def show_waiting_insert(self):
+        """Display the waiting-for-device state."""
+
+        self._reset_view()
+        self.start_button.setEnabled(False)
+        self.button_stack.setCurrentWidget(self.start_button)
+
+        self._set_banner(TXT_INSERT, COLORS["wait"])
+        self._set_user_status("")
+
+
+    def show_ready(self, device_label, device_info_text):
+        """Display a detected and validated device."""
+
+        self.progress.setValue(0)
+
+        self._set_banner(TXT_READY, COLORS["wait"])
+        self._set_user_status(device_label)
+        self._set_steps_status(
+            "Flash drive detected, waiting for START"
         )
+
+        self.set_result_text(device_info_text)
+
+        self.start_button.setEnabled(True)
+        self.button_stack.setCurrentWidget(self.start_button)
+
+
+    def show_testing(self):
+        """Display the active-test state."""
+
+        self._reset_view()
+
+        self._set_banner(TXT_TESTING, COLORS["test"])
+        self._set_user_status(TXT_DO_NOT_UNPLUG)
+
+        self.cancel_button.setEnabled(True)
+        self.button_stack.setCurrentWidget(self.cancel_button)
+
+
+    def show_cancelling(self):
+        """Display cancellation progress."""
+
+        self.cancel_button.setEnabled(False)
+
+        self._set_banner(
+            "Cancellation in progress...",
+            COLORS["test"],
+        )
+
+        self._set_user_status(
+            "Do not unplug the flash drive."
+        )
+
+        self._set_steps_status(
+            "Stopping test operations..."
+        )
+
+
+    def set_step_status(self, text):
+        """Display the current controller step."""
+
+        self._set_steps_status(text)
+
+
+    def set_progress(self, value):
+        """Update the progress bar."""
+
+        self.progress.setValue(value)
+
+
+    def add_speed_sample(self, operation, elapsed_s, speed_mbps):
+        """Add one performance sample to the graph."""
+
+        self.on_sample(operation, elapsed_s, speed_mbps)
+
+
+    def show_vbus_sample(self, phase, sample):
+        """Display one live electrical measurement."""
 
         self.vbus_label.setText(
-            f"VBUS [{self.current_phase}]: "
-            f"{voltage:.3f} V | {current:.2f} mA"
+            f"VBUS [{phase.value}]: "
+            f"{sample.voltage_v:.3f} V | "
+            f"{sample.current_ma:.2f} mA"
         )
 
+    def set_test_link_info(self, reference, cycles, max_cycles):
+        """Update the test-link presentation header."""
 
-    def on_vbus_error(self, message):
-        """Display Acroname monitoring errors."""
-        self.vbus_label.setText(f"VBUS ERROR: {message}")
+        self.test_link_header = (
+            "=== TEST-LINK ===\n"
+            f"Reference : {reference}\n"
+            f"Mating cycle : {cycles} / {max_cycles}"
+        )
 
-    # --- Finalisation et génération des rapports ---
+        self._refresh_information_panel()
 
-    def _display_final_result(self, r, passed):
-        """Enregistre le rapport et affiche le verdict final."""
+    def set_result_text(self, text):
+        """Set the currently displayed device or result text."""
 
-        report_saved = self._write_docx(r)
+        self.current_info = text
+        self._refresh_information_panel()
+
+    def _refresh_information_panel(self):
+        """Render the test-link header and current information."""
+
+        self.info_text.setPlainText(
+            f"{self.test_link_header}\n\n{self.current_info}"
+        )
+
+    def prepare_final_graph(self, result):
+        """Finalize the performance graph."""
+
+        self._refresh_graph()
+
+        for key, color, label in (
+            ("avg_write", "darkblue", "Average Write"),
+            ("avg_read", "darkorange", "Average Read"),
+        ):
+            value = result.get(key)
+
+            if value is not None and value > 0:
+                self.ax.axhline(
+                    value,
+                    linestyle="--",
+                    alpha=0.5,
+                    color=color,
+                    label=f"{label}: {value:.1f} MB/s",
+                )
+
+        self.ax.legend(loc="lower left")
+        self.canvas.draw()
+
+
+    def show_final_result(self, result, report_saved):
+        """Display the final test verdict and report."""
+
+        passed = result["result"] == "PASS"
 
         self.progress.setValue(100)
-        self.state = WAITING_RESTART
+        self.set_result_text(result.get("report", ""))
 
         self._set_banner(
             TXT_PASS if passed else TXT_FAIL,
             COLORS["pass"] if passed else COLORS["fail"],
         )
 
-        if report_saved:
-            self._set_user_status("")
-        else:
-            self._set_user_status(
-                "WARNING: The report has not been saved."
-            )
+        self._set_user_status(
+            "" if report_saved
+            else "WARNING: The report has not been saved."
+        )
 
         self.start_button.setEnabled(False)
         self.button_stack.setCurrentWidget(self.restart_button)
 
 
-    def _write_docx(self, r):
-        """Enregistre le rapport DOCX contenant les résultats et le graphique."""
+    def show_cancel_failed(self, message):
+        """Display an unsuccessful cancellation."""
 
-        path = r.get("docx") or str(
-            RESULTS_DIR / f"USB_report_{datetime.now():%Y%m%d_%H%M%S}.docx"
+        self._set_banner("Cancellation failed", COLORS["fail"])
+        self._set_user_status(
+            "The flash drive could not be restored."
         )
-
-        try:
-            write_docx_report(
-                template_path=TEMPLATE_PATH,
-                output_path=path,
-                report_text=r.get("report", ""),
-                figure=self.figure,
-                of_number=self.test_config["of"],
-                sap=self.test_config["sap"],
-                device=r.get("model", "N/A"),
-                serial=r.get("serial", "N/A"),
-                file_size=f"{TEST_FILE_SIZE_MB} MB",
-                block_size=f"{BLOCK_SIZE_MB} MB",
-                test_duration=(
-                    f"{TEST_CYCLES} cycles"
-                    if TEST_DURATION_MODE == "cycles"
-                    else f"{TEST_DURATION:g} s"
-                ),
-                final_fs=REFORMAT_FS.upper(),
-                station=STATION_NAME,
-                soft_version=SOFTWARE_VERSION,
-            )
-
-        except Exception as exc:
-            self._set_steps_status(f"Report failed: {exc}")
-            return False
-
-        self._set_steps_status(f"Report saved: {path}")
-        return True
-
-
-    def closeEvent(self, event):
-        """Arrête les threads avant de fermer l'application."""
-
-        self._closing = True
-
-        if self.vbus_worker is not None and self.vbus_worker.isRunning():
-            self.vbus_worker.stop()
-            self.vbus_worker.wait()
-
-        # Arrêt du rafraîchissement graphique.
-        self.timer.stop()
-
-        # Interruption du test USB en cours.
-        if self.worker is not None and self.worker.isRunning():
-            self.worker.abort()
-            event.ignore()
-            return
-
-        # Arrêt de la surveillance USB.
-        if self.watcher is not None and self.watcher.isRunning():
-            self.watcher.stop()
-            event.ignore()
-            return
-
-        # Fermeture lorsque tous les threads sont arrêtés.
-        event.accept()
-
+        self._set_steps_status(message)
+        self.button_stack.setCurrentWidget(self.restart_button)

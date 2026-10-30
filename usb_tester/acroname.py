@@ -1,36 +1,58 @@
-"""Acroname USBExt3c interface."""
+"""BrainStem adapter for the Acroname USBExt3c."""
 
 import brainstem
 
 from config import ACRONAME_PORT
 
 
-class Acroname:
-    """Manage USBExt3c connection and VBUS measurements."""
+class USBExt3cAdapter:
+    """Provide synchronous access to one USBExt3c."""
 
     def __init__(self):
-        self.stem = brainstem.stem.USBExt3c()
+        self._stem = brainstem.stem.USBExt3c()
+        self._connected = False
 
     def connect(self):
-        """Connect to the USBExt3c."""
-        err = self.stem.discoverAndConnect(brainstem.link.Spec.USB)
+        """Connect to the first USBExt3c found over USB."""
 
-        if err != 0:
-            raise RuntimeError(f"Acroname connection failed: {err}")
+        error = self._stem.discoverAndConnect(
+            brainstem.link.Spec.USB
+        )
 
-    def measure_vbus(self):
-        """Return VBUS voltage (V) and current (mA)."""
-        voltage = self.stem.usb.getPortVoltage(ACRONAME_PORT)
-        current = self.stem.usb.getPortCurrent(ACRONAME_PORT)
+        if error != brainstem.result.Result.NO_ERROR:
+            raise RuntimeError(
+                f"Acroname connection failed: {error}"
+            )
 
-        if voltage.error != 0:
-            raise RuntimeError(f"Voltage measurement failed: {voltage.error}")
+        self._connected = True
 
-        if current.error != 0:
-            raise RuntimeError(f"Current measurement failed: {current.error}")
+    def read_vbus(self):
+        """Return port voltage in volts and current in milliamperes."""
 
-        return voltage.value / 1_000_000, current.value / 1_000
+        if not self._connected:
+            raise RuntimeError("Acroname is not connected")
+
+        voltage = self._stem.usb.getPortVoltage(ACRONAME_PORT)
+        current = self._stem.usb.getPortCurrent(ACRONAME_PORT)
+
+        if voltage.error != brainstem.result.Result.NO_ERROR:
+            raise RuntimeError(
+                f"Voltage measurement failed: {voltage.error}"
+            )
+
+        if current.error != brainstem.result.Result.NO_ERROR:
+            raise RuntimeError(
+                f"Current measurement failed: {current.error}"
+            )
+
+        return (
+            voltage.value / 1_000_000,
+            current.value / 1_000,
+        )
 
     def disconnect(self):
-        """Disconnect from the USBExt3c."""
-        self.stem.disconnect()
+        """Disconnect safely."""
+
+        if self._connected:
+            self._stem.disconnect()
+            self._connected = False

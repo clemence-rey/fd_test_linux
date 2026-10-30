@@ -3,7 +3,6 @@ Ce module ne gère ni les threads de test ni l'interface graphique.
 """
 
 import os
-import sys
 import json
 import errno
 import mmap
@@ -25,10 +24,14 @@ from dataclasses import dataclass
 from enum import Enum
 
 from config import (
-    USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, 
-    MIN_READ_MBPS, MAX_READ_MBPS, TEST_LINK_FILE, 
+    USB_TEST_PORT, 
+    RESULTS_DIR, 
+    MIN_WRITE_MBPS, 
+    MIN_READ_MBPS, 
+    MAX_READ_MBPS, 
+    TEST_LINK_FILE, 
     MAX_MATING_CYCLES
-    )
+)
 
 
 BLKGETDISKSEQ = 0x80081280
@@ -960,30 +963,7 @@ def build_report(info, result):
         "",
     ])
 
-    # VBUS measurements
-    lines.extend([
-        "=== VBUS MEASUREMENTS ===",
-        "",
-    ])
-
-    for phase, stats in result.get("vbus_stats", {}).items():
-
-        lines.append(phase)
-
-        if stats is None:
-            lines.append("  No measurements available")
-
-        else:
-            lines.extend([
-                f"  Voltage min : {stats['voltage_min']:.3f} V",
-                f"  Voltage avg : {stats['voltage_avg']:.3f} V",
-                f"  Voltage max : {stats['voltage_max']:.3f} V",
-                f"  Current min : {stats['current_min']:.2f} mA",
-                f"  Current avg : {stats['current_avg']:.2f} mA",
-                f"  Current max : {stats['current_max']:.2f} mA",
-            ])
-
-        lines.append("")
+    append_vbus_report(lines, result)
 
     # Reformatage
     lines.extend([
@@ -1228,3 +1208,41 @@ def increment_test_link_counter(test_link):
     save_test_link_counters(counters)
 
     return counters[test_link]["cycles"]
+
+
+def append_vbus_report(lines, result):
+    """Append phase-specific VBUS statistics to report lines."""
+
+    lines.extend([
+        "=== VBUS MEASUREMENTS ===",
+        "",
+    ])
+
+    vbus_error = result.get("vbus_error", "")
+
+    if vbus_error:
+        lines.append(f"Monitoring warning: {vbus_error}")
+        lines.append("")
+
+    stats_by_phase = result.get("vbus_stats", {})
+
+    for phase_name in ("IDLE", "WRITE", "READ"):
+        stats = stats_by_phase.get(phase_name)
+
+        lines.append(phase_name)
+
+        if not stats or stats["n"] == 0:
+            lines.append("  No measurements available")
+            lines.append("")
+            continue
+
+        lines.extend([
+            f"  {'Samples':<18}: {stats['n']}",
+            f"  {'Voltage min':<18}: {stats['voltage_min']:.3f} V",
+            f"  {'Voltage average':<18}: {stats['voltage_avg']:.3f} V",
+            f"  {'Voltage max':<18}: {stats['voltage_max']:.3f} V",
+            f"  {'Current min':<18}: {stats['current_min']:.2f} mA",
+            f"  {'Current average':<18}: {stats['current_avg']:.2f} mA",
+            f"  {'Current max':<18}: {stats['current_max']:.2f} mA",
+            "",
+        ])

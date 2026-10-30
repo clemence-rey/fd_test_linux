@@ -89,4 +89,5 @@ MAX_MATING_CYCLES = 1000
 # ============================================================
 
 ACRONAME_PORT = 1
-VBUS_SAMPLE_INTERVAL = 0.2  # seconds
+VBUS_SAMPLE_INTERVAL_S = 0.2
+VBUS_IDLE_DURATION_S = 2.0
