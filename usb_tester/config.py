@@ -14,7 +14,7 @@ SOFTWARE_VERSION = "1.0"
 
 
 # Port USB réservé au banc de qualification
-USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1"
+USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1.1"
 
 # ============================================================
 # 1. CONFIGURATION DU TEST
@@ -44,7 +44,7 @@ MAX_READ_MBPS = 500.0          # Débit maximal en lecture (MB/s)
 # ============================================================
 
 REFORMAT_FS = "fat32"          # "fat32", "exfat" ou "ntfs"
-REFORMAT_LABEL = "FISCHER FLASH DRIVE"     # Nom du volume après reformatage
+REFORMAT_LABEL = "FISCHER"     # Nom du volume après reformatage
 
 
 # ============================================================
