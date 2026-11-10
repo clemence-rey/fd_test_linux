@@ -13,6 +13,7 @@ import tempfile
 import subprocess
 import numpy as np
 import pyudev
+import time
 from io import BytesIO
 from pathlib import Path
 from docx import Document
@@ -97,6 +98,114 @@ def get_usb_parent_device(udev_device):
     """Retourne le périphérique USB parent (VID/PID)."""
     return udev_device.find_parent("usb", "usb_device")
 
+def get_usb_speed_mbps(devnode):
+    """Return the negotiated USB link speed in Mb/s."""
+
+    udev_device = pyudev.Devices.from_device_file(
+        pyudev.Context(),
+        devnode,
+    )
+
+    usb_device = get_usb_parent_device(udev_device)
+
+    if usb_device is None:
+        raise RuntimeError(
+            "USB parent device not found"
+        )
+
+    speed = (
+        (usb_device.attributes.get("speed") or b"")
+        .decode(errors="ignore")
+        .strip()
+    )
+
+    if not speed:
+        raise RuntimeError(
+            "USB link speed not available"
+        )
+
+    try:
+        return float(speed)
+
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid USB link speed: {speed}"
+        ) from exc
+
+def wait_for_test_port_empty(
+    timeout_s,
+    poll_interval_s=0.1,
+):
+    """Wait until no USB disk is detected on the test port."""
+
+    deadline = time.monotonic() + timeout_s
+
+    while time.monotonic() < deadline:
+
+        if not scan_usb_candidates():
+            return
+
+        time.sleep(poll_interval_s)
+
+    raise RuntimeError(
+        "USB device did not disconnect from the test port"
+    )
+
+def wait_for_test_device(
+    timeout_s,
+    poll_interval_s=0.1,
+    expected_speed_mbps=None,
+    interruption_requested=None,
+):
+    """Wait for one USB disk to enumerate on the test port."""
+
+    deadline = time.monotonic() + timeout_s
+    last_speed = None
+
+    while time.monotonic() < deadline:
+
+        if (
+            interruption_requested is not None
+            and interruption_requested()
+        ):
+            raise RuntimeError(
+                "USB enumeration interrupted"
+            )
+
+        candidates = scan_usb_candidates()
+
+        if len(candidates) > 1:
+            raise RuntimeError(
+                "Multiple USB disks detected on the test port"
+            )
+
+        if len(candidates) == 1:
+            devnode = candidates[0]
+
+            if expected_speed_mbps is None:
+                return devnode, get_usb_speed_mbps(devnode)
+
+            try:
+                last_speed = get_usb_speed_mbps(devnode)
+
+            except (OSError, RuntimeError):
+                time.sleep(poll_interval_s)
+                continue
+
+            if abs(last_speed - expected_speed_mbps) < 1.0:
+                return devnode, last_speed
+
+        time.sleep(poll_interval_s)
+
+    if last_speed is not None:
+        raise RuntimeError(
+            f"USB device enumerated at {last_speed:g} Mb/s "
+            f"instead of {expected_speed_mbps:g} Mb/s"
+        )
+
+    raise RuntimeError(
+        "USB device enumeration timeout"
+    )
 
 def get_diskseq(devnode):
     """Retourne le DISKSEQ du périphérique pour identifier son instance."""
@@ -716,6 +825,12 @@ def create_test_result(devnode):
         "error_detail": "",
         "result": "FAIL",
         "reformat": "",
+        "usb2_test": {
+            "result": "NOT PERFORMED",
+            "speed_mbps": None,
+            "devnode": "",
+            "error": "",
+        },
         "completed": False,
     }
 
@@ -885,6 +1000,20 @@ def get_failure_reasons(result):
     elif result["avg_read"] >= MAX_READ_MBPS:
         reasons.append("Read speed above maximum threshold")
 
+    usb2 = result.get("usb2_test", {})
+
+    if usb2.get("result") == "FAIL":
+        error = usb2.get("error")
+
+        if error:
+            reasons.append(
+                f"USB 2.0 fallback failed: {error}"
+            )
+        else:
+            reasons.append(
+                "USB 2.0 High-Speed enumeration failed"
+            )
+
     if not reasons:
         if result.get("reformat", "").startswith("FAILURE"):
             reasons.append("Reformatting failed (see REFORMATTING section)")
@@ -971,6 +1100,9 @@ def build_report(info, result):
         result.get("reformat", "N/A"),
         "",
     ])
+
+    # Résultat test de fallback usb2
+    append_usb2_report(lines, result)
 
     # Verdict final
     lines.extend([
@@ -1246,3 +1378,36 @@ def append_vbus_report(lines, result):
             f"  {'Current max':<18}: {stats['current_max']:.2f} mA",
             "",
         ])
+
+def append_usb2_report(lines, result):
+    """Append USB 2.0 fallback result to the report."""
+
+    usb2 = result.get("usb2_test", {})
+
+    status = usb2.get(
+        "result",
+        "NOT PERFORMED",
+    )
+
+    lines.extend([
+        "=== USB 2.0 FALLBACK ===",
+        "",
+        f"{'Result':<22}: {status}",
+    ])
+
+    speed = usb2.get("speed_mbps")
+
+    if speed is not None:
+        lines.append(
+            f"{'Negotiated speed':<22}: "
+            f"{speed:g} Mb/s"
+        )
+
+    error = usb2.get("error")
+
+    if error:
+        lines.append(
+            f"{'Error':<22}: {error}"
+        )
+
+    lines.append("")

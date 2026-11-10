@@ -40,13 +40,14 @@ from acroname import USBExt3cAdapter
 
 from model import PhaseEvent, TestPhase, VbusSample
 
-from test_service import UsbTestService
+from test_service import UsbTestService, Usb2FallbackService
 
 
 class AppState(Enum):
     WAITING_INSERT = auto()
     READY = auto()
     TESTING = auto()
+    USB2_TESTING = auto()
     WAITING_RESTART = auto()
 
 
@@ -73,6 +74,7 @@ class AppController(QObject):
 
         self.test_worker = None
         self.vbus_worker = None
+        self.usb2_worker = None
         self.watcher = None
 
         self.vbus_samples = []
@@ -100,6 +102,9 @@ class AppController(QObject):
 
         self.view.show_waiting_insert()
         self._refresh_test_link_display()
+
+        # Always restore the Acroname DUT port before looking for a device.
+        self._restore_acroname_port()
 
         self.watcher = UsbWatcher()
         self.watcher.usb_event.connect(self.on_usb_event)
@@ -130,14 +135,25 @@ class AppController(QObject):
             self.connected_devnode = devnode
             self.connected_diskseq = diskseq
 
-            if is_new_device:
+            operator_insertion = (
+                self.state == AppState.WAITING_INSERT
+                or (
+                    self.state == AppState.WAITING_RESTART
+                    and self.device_removed
+                )
+            )
+
+            if is_new_device and operator_insertion:
                 try:
                     increment_test_link_counter(
                         self.test_config["test_link"]
                     )
                     self._refresh_test_link_display()
+
                 except (OSError, ValueError, TypeError) as exc:
-                    self.view.set_step_status(f"Counter error: {exc}")
+                    self.view.set_step_status(
+                        f"Counter error: {exc}"
+                    )
 
             if self.state in (
                 AppState.WAITING_INSERT,
@@ -159,6 +175,10 @@ class AppController(QObject):
             if self.state == AppState.TESTING:
                 if self.test_worker is not None:
                     self.test_worker.abort("Device disconnected")
+
+            elif self.state == AppState.USB2_TESTING:
+                # Removal is intentional during the fallback test.
+                return
 
             elif self.state == AppState.READY:
                 self._set_waiting_insert()
@@ -300,6 +320,34 @@ class AppController(QObject):
         self.test_worker_started = True
         self.test_worker.start()
 
+    def _start_usb2_test(self):
+        """Start the USB 2.0 fallback test."""
+
+        self.state = AppState.USB2_TESTING
+
+        self.view.set_step_status(
+            "USB 2.0 High-Speed fallback enumeration..."
+        )
+
+        self.view.set_progress(97)
+        self.view.set_cancel_enabled(False)
+
+        self.usb2_worker = Usb2FallbackWorker()
+
+        self.usb2_worker.status.connect(
+            self.view.set_step_status
+        )
+
+        self.usb2_worker.test_done.connect(
+            self._on_usb2_done
+        )
+
+        self.usb2_worker.finished.connect(
+            self._on_usb2_worker_finished
+        )
+
+        self.usb2_worker.start()
+
     def _on_phase_changed(self, event):
         """Store a timestamped phase transition."""
 
@@ -325,7 +373,40 @@ class AppController(QObject):
         if self.vbus_worker is not None and self.vbus_worker.isRunning():
             self.vbus_worker.stop()
         else:
-            QTimer.singleShot(0, self._finalize_test)
+            QTimer.singleShot(
+                0,
+                self._continue_after_vbus
+            )
+
+    def _on_usb2_done(self, usb2_result):
+        """Merge USB2 fallback result into the main test result."""
+
+        if self.pending_result is None:
+            return
+
+        self.pending_result["usb2_test"] = usb2_result
+
+        if usb2_result["result"] != "PASS":
+            self.pending_result["result"] = "FAIL"
+
+    def _on_usb2_worker_finished(self):
+        """Release USB2 worker and finalize the qualification."""
+
+        worker = self.sender()
+
+        if worker is not None:
+            worker.deleteLater()
+
+        if self.usb2_worker is worker:
+            self.usb2_worker = None
+
+        if self.pending_result is not None:
+            QTimer.singleShot(
+                0,
+                self._finalize_test,
+            )
+
+        self._try_finish_shutdown()
 
     def _on_vbus_worker_finished(self):
         """Finalize the test after the last VBUS sample."""
@@ -339,9 +420,42 @@ class AppController(QObject):
             self.vbus_worker = None
 
         if self.pending_result is not None:
-            QTimer.singleShot(0, self._finalize_test)
+            QTimer.singleShot(
+                0,
+                self._continue_after_vbus
+            )
 
         self._try_finish_shutdown()
+
+
+    def _continue_after_vbus(self):
+        """Start USB2 fallback after VBUS acquisition has stopped."""
+
+        result = self.pending_result
+
+        if result is None:
+            return
+
+        # No additional test after cancellation or an incomplete
+        # performance/reformat sequence.
+        if result["result"] in (
+            "CANCELLED",
+            "CANCEL_FAILED",
+        ):
+            QTimer.singleShot(
+                0,
+                self._finalize_test,
+            )
+            return
+
+        if not result.get("completed", False):
+            QTimer.singleShot(
+                0,
+                self._finalize_test,
+            )
+            return
+
+        self._start_usb2_test()
         
 
     def _finalize_test(self):
@@ -462,7 +576,11 @@ class AppController(QObject):
         if self.watcher is not None and self.watcher.isRunning():
             self.watcher.stop()
 
+        if self.usb2_worker is not None and self.usb2_worker.isRunning():
+            self.usb2_worker.stop()
+
         self._try_finish_shutdown()
+
 
     def _on_thread_finished(self):
         """Recheck whether application shutdown can complete."""
@@ -479,6 +597,7 @@ class AppController(QObject):
             self.test_worker,
             self.vbus_worker,
             self.watcher,
+            self.usb2_worker,
         )
 
         if any(
@@ -571,6 +690,23 @@ class AppController(QObject):
             self.test_worker = None
 
         self._try_finish_shutdown()
+
+    def _restore_acroname_port(self):
+        """Force Acroname into the normal USB 2 + USB 3 state."""
+
+        adapter = USBExt3cAdapter()
+
+        try:
+            adapter.connect()
+            adapter.restore_normal_port()
+
+        except Exception as exc:
+            self.view.set_step_status(
+                f"Acroname initialization failed: {exc}"
+            )
+
+        finally:
+            adapter.disconnect()
 
 # ============================================================
 # 1. SURVEILLANCE DES PÉRIPHÉRIQUES USB
@@ -788,4 +924,25 @@ class TestWorker(QThread):
             )
         )
 
- 
+
+class Usb2FallbackWorker(QThread):
+    """Run USB 2.0 fallback verification outside the GUI thread."""
+
+    status = pyqtSignal(str)
+    test_done = pyqtSignal(dict)
+
+    def run(self):
+        service = Usb2FallbackService(
+            emit_status=self.status.emit,
+            interruption_requested=self.isInterruptionRequested,
+        )
+
+        result = service.run()
+
+        self.test_done.emit(result)
+
+
+    def stop(self):
+        """Request worker interruption."""
+
+        self.requestInterruption()

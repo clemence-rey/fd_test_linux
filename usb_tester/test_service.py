@@ -23,6 +23,8 @@ from model import (
     evaluate_usb_test,
     compute_mbps,
     reformat_device,
+    wait_for_test_port_empty,
+    wait_for_test_device,
 )
 
 from config import (
@@ -35,8 +37,14 @@ from config import (
     TEST_DURATION,
     TEST_CYCLES,
     REFORMAT_FS,
-    REFORMAT_LABEL
+    REFORMAT_LABEL,
+    USB2_ENUM_TIMEOUT_S,
+    USB2_DISCONNECT_TIMEOUT_S,
+    USB2_RESTORE_TIMEOUT_S,
+    USB2_POLL_INTERVAL_S,
 )
+
+from acroname import USBExt3cAdapter
 
 from model import TestPhase, PhaseEvent
 
@@ -649,3 +657,131 @@ class UsbTestService:
             )
         )
 
+
+class Usb2FallbackService:
+    """Verify USB 2.0 High-Speed fallback enumeration."""
+
+    def __init__(
+        self,
+        emit_status,
+        interruption_requested,
+    ):
+        self.emit_status = emit_status
+        self.interruption_requested = interruption_requested
+
+
+    def run(self):
+        """Execute the USB 2.0 fallback test and restore USB 3."""
+
+        result = {
+            "result": "FAIL",
+            "speed_mbps": None,
+            "devnode": "",
+            "error": "",
+        }
+
+        adapter = USBExt3cAdapter()
+        connected = False
+
+        try:
+            # ------------------------------------------------
+            # Connect to Acroname
+            # ------------------------------------------------
+
+            self.emit_status(
+                "USB 2.0 fallback - connecting to Acroname..."
+            )
+
+            adapter.connect()
+            connected = True
+
+            # ------------------------------------------------
+            # Power-cycle DUT
+            # ------------------------------------------------
+
+            self.emit_status(
+                "USB 2.0 fallback - disconnecting DUT..."
+            )
+
+            adapter.power_off_dut()
+
+            wait_for_test_port_empty(
+                timeout_s=USB2_DISCONNECT_TIMEOUT_S,
+                poll_interval_s=USB2_POLL_INTERVAL_S,
+            )
+
+            time.sleep(0.3)
+
+            # ------------------------------------------------
+            # Reconnect with USB2 only
+            # ------------------------------------------------
+
+            self.emit_status(
+                "USB 2.0 fallback - reconnecting at High-Speed..."
+            )
+
+            adapter.enable_usb2_only()
+
+            devnode, speed = wait_for_test_device(
+                timeout_s=USB2_ENUM_TIMEOUT_S,
+                poll_interval_s=USB2_POLL_INTERVAL_S,
+                expected_speed_mbps=480.0,
+                interruption_requested=self.interruption_requested,
+            )
+
+            result["result"] = "PASS"
+            result["speed_mbps"] = speed
+            result["devnode"] = devnode
+
+        except Exception as exc:
+
+            result["result"] = "FAIL"
+            result["error"] = str(exc)
+
+        finally:
+
+            # ------------------------------------------------
+            # Restore normal USB3 operation
+            # ------------------------------------------------
+
+            if connected:
+                try:
+                    self.emit_status(
+                        "Restoring normal USB operation..."
+                    )
+
+                    adapter.power_off_dut()
+
+                    wait_for_test_port_empty(
+                        timeout_s=USB2_DISCONNECT_TIMEOUT_S,
+                        poll_interval_s=USB2_POLL_INTERVAL_S,
+                    )
+
+                    time.sleep(0.3)
+
+                    adapter.enable_normal_usb()
+
+                    wait_for_test_device(
+                        timeout_s=USB2_RESTORE_TIMEOUT_S,
+                        poll_interval_s=USB2_POLL_INTERVAL_S,
+                    )
+
+                except Exception as exc:
+
+                    restore_error = (
+                        f"USB restore failed: {exc}"
+                    )
+
+                    if result["error"]:
+                        result["error"] += (
+                            f" | {restore_error}"
+                        )
+                    else:
+                        result["error"] = restore_error
+
+                    result["result"] = "FAIL"
+
+                finally:
+                    adapter.disconnect()
+
+        return result

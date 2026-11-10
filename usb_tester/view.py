@@ -436,6 +436,9 @@ class MainWindow(QMainWindow):
         """Notify the Controller that cancellation was requested."""
         self.cancel_requested.emit()
 
+    def set_cancel_enabled(self, enabled):
+        """Enable or disable test cancellation."""
+        self.cancel_button.setEnabled(enabled)
 
     def on_restart_clicked(self):
         """Notify the Controller that a new test was requested."""
