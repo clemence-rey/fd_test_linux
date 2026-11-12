@@ -365,14 +365,18 @@ class MainWindow(QMainWindow):
         # PASS / FAIL thresholds
         self.ax.axhline(
             MIN_WRITE_MBPS,
-            linestyle="--",
-            color="darkblue",
-            label=f"Min Write: {MIN_WRITE_MBPS:g} MB/s")
+            linestyle="-.",
+            linewidth=1.5,
+            color="gray",
+            label=f"Min Write: {MIN_WRITE_MBPS:g} MB/s",
+        )
         self.ax.axhline(
             MIN_READ_MBPS,
-            linestyle="--",
-            color="darkorange",
-            label=f"Min Read: {MIN_READ_MBPS:g} MB/s")
+            linestyle=":",
+            linewidth=1.5,
+            color="gray",
+            label=f"Min Read: {MIN_READ_MBPS:g} MB/s",
+        )
         self.ax.legend(loc="lower left")
         self.figure.tight_layout()
         self.canvas.draw_idle()

@@ -371,6 +371,8 @@ class AppController(QObject):
     def _on_usb2_done(self, usb2_result):
         """Merge USB2 fallback result into the main test result."""
 
+        self.view.set_progress(98)
+
         if self.pending_result is None:
             return
 
@@ -483,13 +485,12 @@ class AppController(QObject):
 
         self.view.prepare_final_graph(result)
 
-        report_saved = self._save_report(result)
+        self.view.set_progress(99)
+        self.view.set_step_status("Generating report...")
 
-        self.state = AppState.WAITING_RESTART
-
-        self.view.show_final_result(
-            result=result,
-            report_saved=report_saved,
+        QTimer.singleShot(
+            100,
+            lambda: self._save_report(result),
         )
 
     def _save_report(self, result):
@@ -526,10 +527,19 @@ class AppController(QObject):
             self.view.set_step_status(
                 f"Report failed: {exc}"
             )
-            return False
+            report_saved = False
 
-        self.view.set_step_status(
-            f"Report saved: {path}"
+        else:
+            self.view.set_step_status(
+                f"Report saved: {path}"
+            )
+            report_saved = True
+
+        self.state = AppState.WAITING_RESTART
+
+        self.view.show_final_result(
+            result=result,
+            report_saved=report_saved,
         )
 
         return True

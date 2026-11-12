@@ -194,11 +194,6 @@ class UsbTestService:
                 "Duration_s", "MB/s", "Integrity"
             ])
 
-            # Global measurement start time.
-            self._global_start = time.perf_counter()
-
-            # WRITE AND READ CYCLE EXECUTION
-
             # Open the disk exclusively using O_DIRECT.
             # The opened device identity is also verified.
             fd = open_test_device(devnode, self.expected_diskseq)
@@ -207,12 +202,21 @@ class UsbTestService:
             self.emit_status("Measuring idle VBUS...")
             self._emit_phase(TestPhase.IDLE)
 
-            deadline = time.monotonic() + VBUS_IDLE_DURATION_S
+            idle_step_duration = VBUS_IDLE_DURATION_S / 5
 
-            while (time.monotonic() < deadline and not self.interruption_requested()):
-                time.sleep(0.05)
+            for progress in range(1, 6):
+                if self.interruption_requested():
+                    break
+
+                time.sleep(idle_step_duration)
+                self.emit_progress(progress)
 
             self._emit_phase(TestPhase.OTHER)
+
+            # Start performance-test timing after the idle phase.
+            self._global_start = time.perf_counter()
+
+            # WRITE AND READ CYCLE EXECUTION
 
             while (
                 not self._is_limit_reached()
@@ -558,7 +562,7 @@ class UsbTestService:
         else:
             progress = self._get_elapsed() / TEST_DURATION
 
-        pct = min(95, int(progress * 95))
+        pct = min(95, 5 + int(progress * 90))
 
         if pct != self._last_pct:
             self._last_pct = pct
@@ -575,6 +579,8 @@ class UsbTestService:
             result["reformat"] = "NOT PERFORMED (test interrupted)"
             return
 
+
+        self.emit_progress(96)
         self.emit_status(
             f"Reformatting to {REFORMAT_FS.upper()}..."
         )
