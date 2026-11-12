@@ -110,7 +110,6 @@ class UsbTestService:
             3. Exécuter les cycles d'écriture et de lecture.
             4. Calculer les performances et le verdict.
             5. Reformater la clé si le test n'a pas été interrompu.
-            6. Générer le rapport final.
 
         Les E/S sont réalisées directement sur le périphérique avec O_DIRECT.
         """
@@ -759,7 +758,7 @@ class Usb2FallbackService:
 
                     time.sleep(0.3)
 
-                    adapter.enable_normal_usb()
+                    adapter.restore_normal_port()
 
                     wait_for_test_device(
                         timeout_s=USB2_RESTORE_TIMEOUT_S,

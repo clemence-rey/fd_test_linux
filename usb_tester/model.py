@@ -37,6 +37,7 @@ from config import (
 
 BLKGETDISKSEQ = 0x80081280
 
+
 # ============================================================
 # 1. OUTILS SYSTÈME
 # ============================================================
@@ -71,6 +72,7 @@ def get_root_disk():
 
 ROOT_DISK = get_root_disk()
 
+
 # ============================================================
 # 2. DÉTECTION ET IDENTIFICATION USB
 # ============================================================
@@ -97,6 +99,7 @@ def scan_usb_candidates():
 def get_usb_parent_device(udev_device):
     """Retourne le périphérique USB parent (VID/PID)."""
     return udev_device.find_parent("usb", "usb_device")
+
 
 def get_usb_speed_mbps(devnode):
     """Return the negotiated USB link speed in Mb/s."""
@@ -132,6 +135,7 @@ def get_usb_speed_mbps(devnode):
             f"Invalid USB link speed: {speed}"
         ) from exc
 
+
 def wait_for_test_port_empty(
     timeout_s,
     poll_interval_s=0.1,
@@ -150,6 +154,7 @@ def wait_for_test_port_empty(
     raise RuntimeError(
         "USB device did not disconnect from the test port"
     )
+
 
 def wait_for_test_device(
     timeout_s,
@@ -207,6 +212,7 @@ def wait_for_test_device(
         "USB device enumeration timeout"
     )
 
+
 def get_diskseq(devnode):
     """Retourne le DISKSEQ du périphérique pour identifier son instance."""
     try:
@@ -239,6 +245,7 @@ def assert_test_port(devnode):
         raise RuntimeError(
             f"Unauthorized port : {devnode} (ID_PATH={id_path})"
         )
+
 
 # ============================================================
 # 3. INFORMATIONS DU PÉRIPHÉRIQUE
@@ -363,6 +370,7 @@ def get_device_size_bytes(devnode):
     finally:
         os.close(fd)
 
+
 # ============================================================
 # 4. ACCÈS DIRECT AU PÉRIPHÉRIQUE
 # ============================================================
@@ -402,6 +410,7 @@ def open_test_device(devnode, expected_diskseq):
     except Exception:
         os.close(fd)
         raise
+
 
 # ============================================================
 # 5. GESTION DES PARTITIONS ET REFORMATAGE
@@ -581,6 +590,7 @@ def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
             f"(blkid : {detected or 'unknown'}, expected : {cfg['blkid']})"
         )
 
+
 # ============================================================
 # DOMAIN VALUES
 # ============================================================
@@ -609,6 +619,7 @@ class VbusSample:
     timestamp_ns: int
     voltage_v: float
     current_ma: float
+
 
 # ============================================================
 # 6. CALCULS ET STATISTIQUES
@@ -701,6 +712,7 @@ def compute_intra_cycle_stats(cycle_measurements):
         "std": std,
         "cv": std / global_mean * 100 if global_mean > 0 else None,
     }
+
 
 def _empty_vbus_stats():
     """Return an empty but structurally complete VBUS result."""
@@ -800,6 +812,7 @@ def compute_vbus_phase_stats(samples, phase_events):
 
     return statistics
 
+
 # ============================================================
 # 7. GESTION DES RÉSULTATS ET DES ERREURS
 # ============================================================
@@ -889,7 +902,6 @@ def set_result_error(result, exc, operation=""):
 # 8. PASS/FAIL CRITERIA EVALUATION
 # ============================================================
 
-
 def evaluate_usb_test(
     total_written,
     total_read,
@@ -939,6 +951,7 @@ def evaluate_usb_test(
         "completed": completed,
         "result": "PASS" if passed else "FAIL",
     }
+
 
 # ============================================================
 # 8. GÉNÉRATION DES RAPPORTS
@@ -1022,6 +1035,78 @@ def get_failure_reasons(result):
 
     return reasons
 
+
+def append_vbus_report(lines, result):
+    """Append phase-specific VBUS statistics to report lines."""
+
+    lines.extend([
+        "=== VBUS MEASUREMENTS ===",
+        "",
+    ])
+
+    vbus_error = result.get("vbus_error", "")
+
+    if vbus_error:
+        lines.append(f"Monitoring warning: {vbus_error}")
+        lines.append("")
+
+    stats_by_phase = result.get("vbus_stats", {})
+
+    for phase_name in ("IDLE", "WRITE", "READ"):
+        stats = stats_by_phase.get(phase_name)
+
+        lines.append(phase_name)
+
+        if not stats or stats["n"] == 0:
+            lines.append("  No measurements available")
+            lines.append("")
+            continue
+
+        lines.extend([
+            f"  {'Samples':<18}: {stats['n']}",
+            f"  {'Voltage min':<18}: {stats['voltage_min']:.3f} V",
+            f"  {'Voltage average':<18}: {stats['voltage_avg']:.3f} V",
+            f"  {'Voltage max':<18}: {stats['voltage_max']:.3f} V",
+            f"  {'Current min':<18}: {stats['current_min']:.2f} mA",
+            f"  {'Current average':<18}: {stats['current_avg']:.2f} mA",
+            f"  {'Current max':<18}: {stats['current_max']:.2f} mA",
+            "",
+        ])
+
+
+def append_usb2_report(lines, result):
+    """Append USB 2.0 fallback result to the report."""
+
+    usb2 = result.get("usb2_test", {})
+
+    status = usb2.get(
+        "result",
+        "NOT PERFORMED",
+    )
+
+    lines.extend([
+        "=== USB 2.0 FALLBACK ===",
+        "",
+        f"{'Result':<22}: {status}",
+    ])
+
+    speed = usb2.get("speed_mbps")
+
+    if speed is not None:
+        lines.append(
+            f"{'Negotiated speed':<22}: "
+            f"{speed:g} Mb/s"
+        )
+
+    error = usb2.get("error")
+
+    if error:
+        lines.append(
+            f"{'Error':<22}: {error}"
+        )
+
+    lines.append("")
+ 
 
 def build_report(info, result):
     """Construit le rapport textuel du test USB."""
@@ -1281,6 +1366,7 @@ def write_docx_report(
 
     return output_path
 
+
 # ============================================================
 # 8. GESTION DES COMPTEURS D'USURE DES TEST-LINKS
 # ============================================================
@@ -1341,73 +1427,4 @@ def increment_test_link_counter(test_link):
 
     return counters[test_link]["cycles"]
 
-
-def append_vbus_report(lines, result):
-    """Append phase-specific VBUS statistics to report lines."""
-
-    lines.extend([
-        "=== VBUS MEASUREMENTS ===",
-        "",
-    ])
-
-    vbus_error = result.get("vbus_error", "")
-
-    if vbus_error:
-        lines.append(f"Monitoring warning: {vbus_error}")
-        lines.append("")
-
-    stats_by_phase = result.get("vbus_stats", {})
-
-    for phase_name in ("IDLE", "WRITE", "READ"):
-        stats = stats_by_phase.get(phase_name)
-
-        lines.append(phase_name)
-
-        if not stats or stats["n"] == 0:
-            lines.append("  No measurements available")
-            lines.append("")
-            continue
-
-        lines.extend([
-            f"  {'Samples':<18}: {stats['n']}",
-            f"  {'Voltage min':<18}: {stats['voltage_min']:.3f} V",
-            f"  {'Voltage average':<18}: {stats['voltage_avg']:.3f} V",
-            f"  {'Voltage max':<18}: {stats['voltage_max']:.3f} V",
-            f"  {'Current min':<18}: {stats['current_min']:.2f} mA",
-            f"  {'Current average':<18}: {stats['current_avg']:.2f} mA",
-            f"  {'Current max':<18}: {stats['current_max']:.2f} mA",
-            "",
-        ])
-
-def append_usb2_report(lines, result):
-    """Append USB 2.0 fallback result to the report."""
-
-    usb2 = result.get("usb2_test", {})
-
-    status = usb2.get(
-        "result",
-        "NOT PERFORMED",
-    )
-
-    lines.extend([
-        "=== USB 2.0 FALLBACK ===",
-        "",
-        f"{'Result':<22}: {status}",
-    ])
-
-    speed = usb2.get("speed_mbps")
-
-    if speed is not None:
-        lines.append(
-            f"{'Negotiated speed':<22}: "
-            f"{speed:g} Mb/s"
-        )
-
-    error = usb2.get("error")
-
-    if error:
-        lines.append(
-            f"{'Error':<22}: {error}"
-        )
-
-    lines.append("")
+   

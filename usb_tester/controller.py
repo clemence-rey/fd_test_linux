@@ -38,7 +38,7 @@ from model import (
 
 from acroname import USBExt3cAdapter
 
-from model import PhaseEvent, TestPhase, VbusSample
+from model import TestPhase, VbusSample
 
 from test_service import UsbTestService, Usb2FallbackService
 
@@ -70,7 +70,6 @@ class AppController(QObject):
 
         self.device_removed = False
         self.new_device_ready = False
-        self.waiting_for_removal = False
 
         self.test_worker = None
         self.vbus_worker = None
@@ -108,7 +107,7 @@ class AppController(QObject):
 
         self.watcher = UsbWatcher()
         self.watcher.usb_event.connect(self.on_usb_event)
-        self.watcher.finished.connect(self._on_thread_finished)
+        self.watcher.finished.connect(self._try_finish_shutdown)
         self.watcher.start()
 
         # --- Gestion des états de l'interface ---
@@ -582,11 +581,6 @@ class AppController(QObject):
         self._try_finish_shutdown()
 
 
-    def _on_thread_finished(self):
-        """Recheck whether application shutdown can complete."""
-
-        self._try_finish_shutdown()
-
     def _try_finish_shutdown(self):
         """Close the View when no worker is still running."""
 
@@ -913,16 +907,6 @@ class TestWorker(QThread):
     def cancel(self):
         self.cancel_requested = True
         self.requestInterruption()
-
-    def _emit_phase(self, phase):
-        """Emit an accurately timestamped test-phase transition."""
-
-        self.phase_changed.emit(
-            PhaseEvent(
-                timestamp_ns=time.monotonic_ns(),
-                phase=phase,
-            )
-        )
 
 
 class Usb2FallbackWorker(QThread):

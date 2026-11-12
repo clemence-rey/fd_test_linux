@@ -158,9 +158,3 @@ class USBExt3cAdapter:
             error,
             "DUT power enable",
         )
-
-
-    def enable_normal_usb(self):
-        """Restore normal USB 2 + USB 3 operation."""
-
-        self.restore_normal_port()

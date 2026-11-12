@@ -58,7 +58,7 @@ def main():
     test_config = setup.get_configuration()
 
     # Création et affichage de la fenêtre principale.
-    view = MainWindow(test_config)
+    view = MainWindow()
 
     controller = AppController(
         view=view,

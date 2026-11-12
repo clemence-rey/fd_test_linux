@@ -41,8 +41,6 @@ from config import (
 # 1. CONSTANTES DE L'INTERFACE
 # ============================================================
 
-WAITING_INSERT, READY, TESTING, WAITING_RESTART = range(4)
-
 COLORS = {
     "wait": "#1f4e79",
     "test": "#b26a00",
@@ -58,11 +56,9 @@ TXT_READY = "Flash drive detected"
 TXT_TESTING = "In progress..."
 TXT_PASS = "PASS"
 TXT_FAIL = "FAIL"
-TXT_INTERRUPT = "TEST INTERRUPTED"
 
 # -- texte de statut
 TXT_DO_NOT_UNPLUG = "Do not unplug"
-TXT_REMOVE = "Remove flash drive"
 
 # -- texte boutons
 TXT_BUTTON_START = "START"
@@ -190,21 +186,15 @@ class MainWindow(QMainWindow):
 
     # --- Initialisation de l'interface ---
 
-    def __init__(self, test_config):
+    def __init__(self):
         """Initialise la fenêtre, ses états et les threads de surveillance."""
         super().__init__()
 
-        self.test_config = test_config
         self.setWindowTitle(TXT_WINDOW_TITLE)
         self.setWindowState(self.windowState() | Qt.WindowMaximized)
 
         # Périphérique USB et état de l'application.
         self.current_info = ""
-        self.current_phase = "IDLE"
-
-        # Gestion des threads.
-        self._closing = False
-        self.vbus_measurements = []
 
         self.test_link_header = ""
         self._close_allowed = False
@@ -215,7 +205,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._set_banner(TXT_INSERT, COLORS["wait"])
         self._set_user_status("")
-        self._render_info("")
+        self.set_result_text("")
 
         # Rafraîchissement périodique du graphique.
         self.timer = QTimer(self)
@@ -331,16 +321,11 @@ class MainWindow(QMainWindow):
         self.dev_status_label.setText(f"Step : {text}")
 
 
-    def _render_info(self, text):
-        """Display the text supplied by the Controller."""
-        self.set_result_text(text)
-
-
     def _reset_view(self):
         """Efface les informations et réinitialise le graphique et la progression."""
 
         # Informations du test précédent.
-        self._render_info("")
+        self.set_result_text("")
         self._set_steps_status("")
 
         # Graphique des performances.
@@ -401,30 +386,6 @@ class MainWindow(QMainWindow):
         self.ax.relim()
         self.ax.autoscale_view()
         self.canvas.draw_idle()
-
-
-    def on_sample(self, op, t, mbps):
-        """Ajoute les mesures d'écriture et de lecture aux séries du graphique."""
-
-        if op == "SEP":
-            nan = float("nan")
-            self.wt.append(nan)
-            self.ws.append(nan)
-            self.rt.append(nan)
-            self.rs.append(nan)
-
-        elif op == "WRITE":
-            self.wt.append(t)
-            self.ws.append(mbps)
-
-        elif op == "READ":
-            self.rt.append(t)
-            self.rs.append(mbps)
-
-        else:
-            return
-
-        self.graph_dirty = True
 
 
     def on_start_clicked(self):
@@ -540,7 +501,25 @@ class MainWindow(QMainWindow):
     def add_speed_sample(self, operation, elapsed_s, speed_mbps):
         """Add one performance sample to the graph."""
 
-        self.on_sample(operation, elapsed_s, speed_mbps)
+        if operation == "SEP":
+            nan = float("nan")
+            self.wt.append(nan)
+            self.ws.append(nan)
+            self.rt.append(nan)
+            self.rs.append(nan)
+
+        elif operation == "WRITE":
+            self.wt.append(elapsed_s)
+            self.ws.append(speed_mbps)
+
+        elif operation == "READ":
+            self.rt.append(elapsed_s)
+            self.rs.append(speed_mbps)
+
+        else:
+            return
+
+        self.graph_dirty = True
 
 
     def show_vbus_sample(self, phase, sample):
