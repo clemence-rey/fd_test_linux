@@ -1,5 +1,6 @@
-"""Fonctions techniques du test USB : détection, E/S, erreurs et rapports.
-Ce module ne gère ni les threads de test ni l'interface graphique.
+"""Technical USB test functions: detection, I/O, errors and reporting.
+
+This module handles neither test threads nor the graphical interface.
 """
 
 import os
@@ -39,11 +40,11 @@ BLKGETDISKSEQ = 0x80081280
 
 
 # ============================================================
-# 1. OUTILS SYSTÈME
+# 1. SYSTEM UTILITIES
 # ============================================================
 
 def run_command(cmd, timeout=20, input_text=None):
-    """Exécute une commande et retourne (stdout, stderr, returncode)."""
+    """Execute a command and return (stdout, stderr, returncode)."""
     try:
         result = subprocess.run(
             cmd,
@@ -59,7 +60,7 @@ def run_command(cmd, timeout=20, input_text=None):
 
     
 def get_root_disk():
-    """Retourne le nom du disque contenant la partition système."""
+    """Return the disk containing the system root partition."""
     source, _, rc = run_command(["findmnt", "-n", "-o", "SOURCE", "/"])
 
     if rc != 0 or not source:
@@ -74,11 +75,11 @@ ROOT_DISK = get_root_disk()
 
 
 # ============================================================
-# 2. DÉTECTION ET IDENTIFICATION USB
+# 2. USB DETECTION AND IDENTIFICATION
 # ============================================================
 
 def scan_usb_candidates():
-    """Liste les disques USB connectés au port de test, hors disque système."""
+    """List USB disks connected to the dedicated test port, excluding the system disk."""
     candidates = []
 
     for dev in pyudev.Context().list_devices(subsystem="block", DEVTYPE="disk"):
@@ -97,7 +98,7 @@ def scan_usb_candidates():
 
 
 def get_usb_parent_device(udev_device):
-    """Retourne le périphérique USB parent (VID/PID)."""
+    """Return the parent USB device containing VID/PID information."""
     return udev_device.find_parent("usb", "usb_device")
 
 
@@ -214,7 +215,7 @@ def wait_for_test_device(
 
 
 def get_diskseq(devnode):
-    """Retourne le DISKSEQ du périphérique pour identifier son instance."""
+    """Return the DISKSEQ identifying the current device instance."""
     try:
         device = pyudev.Devices.from_device_file(pyudev.Context(), devnode)
         return int(device.properties["DISKSEQ"])
@@ -226,7 +227,7 @@ def get_diskseq(devnode):
 
 
 def assert_same_device(devnode, expected_diskseq):
-    """Vérifie que le périphérique n'a pas été remplacé."""
+    """Verify that the device has not been replaced."""
     current_diskseq = get_diskseq(devnode)
 
     if current_diskseq != expected_diskseq:
@@ -237,7 +238,7 @@ def assert_same_device(devnode, expected_diskseq):
 
 
 def assert_test_port(devnode):
-    """Vérifie que le périphérique utilise le port USB réservé."""
+    """Verify that the device is connected to the dedicated USB test port."""
     dev = pyudev.Devices.from_device_file(pyudev.Context(), devnode)
     id_path = dev.get("ID_PATH", "")
 
@@ -255,11 +256,11 @@ def assert_expected_test_device(devnode, expected_diskseq):
 
 
 # ============================================================
-# 3. INFORMATIONS DU PÉRIPHÉRIQUE
+# 3. DEVICE INFORMATION
 # ============================================================
 
 def get_device_info(devnode):
-    """Récupère les informations du périphérique via lsblk et pyudev."""
+    """Retrieve device information using lsblk and pyudev."""
     info = {
         "Devnode": devnode,
         "Model": "N/A",
@@ -272,7 +273,7 @@ def get_device_info(devnode):
         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    # Informations du disque via lsblk
+    # Disk information from lsblk
     lb = get_lsblk_info(devnode)
 
     info["Model"] = lb.get("model") or "N/A"
@@ -285,7 +286,7 @@ def get_device_info(devnode):
     except (ValueError, TypeError):
         pass
 
-    # Informations USB via pyudev
+    # USB information from pyudev
     try:
         udev_dev = pyudev.Devices.from_device_file(pyudev.Context(), devnode)
         usb_dev = get_usb_parent_device(udev_dev)
@@ -327,7 +328,7 @@ def get_device_info(devnode):
 
 
 def get_lsblk_info(devnode):
-    """Retourne les informations du disque fournies par lsblk."""
+    """Return disk information reported by lsblk."""
     out, _, rc = run_command([
         "lsblk", "-b", "-J", "-o", "NAME,MODEL,SERIAL,SIZE,VENDOR", devnode
     ])
@@ -342,7 +343,7 @@ def get_lsblk_info(devnode):
 
 
 def get_usb_speed_label(speed_mbps):
-    """Convertit une vitesse USB en Mb/s en libellé lisible."""
+    """Convert a USB link speed into a human-readable label."""
     try:
         speed = float(speed_mbps)
     except (TypeError, ValueError):
@@ -365,7 +366,7 @@ def get_usb_speed_label(speed_mbps):
 
 
 def get_device_size_bytes(devnode):
-    """Retourne la capacité du périphérique bloc en octets."""
+    """Return the block device capacity in bytes."""
     out, _, rc = run_command(["blockdev", "--getsize64", devnode])
 
     if rc == 0 and out.isdigit():
@@ -379,11 +380,11 @@ def get_device_size_bytes(devnode):
 
 
 # ============================================================
-# 4. ACCÈS DIRECT AU PÉRIPHÉRIQUE
+# 4. DIRECT DEVICE ACCESS
 # ============================================================
 
 def create_aligned_buffer(size, fill=None):
-    """Crée un buffer mmap aligné en mémoire, compatible avec O_DIRECT."""
+    """Create an aligned mmap buffer compatible with O_DIRECT."""
     buf = mmap.mmap(-1, size)
 
     if fill is not None:
@@ -425,7 +426,7 @@ def open_test_device(devnode, expected_diskseq):
 
 
 # ============================================================
-# 5. GESTION DES PARTITIONS ET REFORMATAGE
+# 5. PARTITIONING AND REFORMATTING
 # ============================================================
 
 FILESYSTEM_CONFIG = {
@@ -668,18 +669,18 @@ class VbusSample:
 
 
 # ============================================================
-# 6. CALCULS ET STATISTIQUES
+# 6. CALCULATIONS AND STATISTICS
 # ============================================================
 
 def compute_mbps(byte_count, duration):
-    """Calcule le débit en MB/s à partir des octets transférés et de la durée."""
+    """Compute throughput in MB/s from transferred bytes and duration."""
     if duration <= 0:
         return 0.0
     return byte_count / duration / 1e6
 
 
 def compute_inter_cycle_stats(cycle_measurements):
-    """Calcule la dispersion des débits moyens entre les cycles."""
+    """Compute the dispersion of average speeds between test cycles."""
 
     cycles = []
 
@@ -719,7 +720,7 @@ def compute_inter_cycle_stats(cycle_measurements):
 
 
 def compute_intra_cycle_stats(cycle_measurements):
-    """Calcule la dispersion des débits des blocs au sein des cycles."""
+    """Compute block-speed dispersion within test cycles."""
 
     total_bytes = 0
     total_time = 0.0
@@ -860,11 +861,11 @@ def compute_vbus_phase_stats(samples, phase_events):
 
 
 # ============================================================
-# 7. GESTION DES RÉSULTATS ET DES ERREURS
+# 7. RESULT AND ERROR HANDLING
 # ============================================================
 
 def create_test_result(devnode):
-    """Initialise le dictionnaire des mesures et du verdict du test."""
+    """Initialize the measurement and qualification result structure."""
     return {
         "devnode": devnode,
         "model": "N/A",
@@ -895,7 +896,7 @@ def create_test_result(devnode):
 
 
 def classify_error(exc, operation=""):
-    """Convertit une exception en erreur structurée pour le rapport."""
+    """Convert an exception into a structured report error."""
 
     if isinstance(exc, OSError):
         error_map = {
@@ -934,7 +935,7 @@ def classify_error(exc, operation=""):
 
 
 def set_result_error(result, exc, operation=""):
-    """Enregistre une exception et marque le test comme échoué."""
+    """Store an exception and mark the test as failed."""
     error = classify_error(exc, operation)
 
     result["error"] = error["message"]
@@ -1000,17 +1001,17 @@ def evaluate_performance_test(
 
 
 # ============================================================
-# 8. GÉNÉRATION DES RAPPORTS
+# 8. REPORT GENERATION
 # ============================================================
 
 def sanitize_filename(text):
-    """Génère un nom de fichier avec des caractères ASCII."""
+    """Generate an ASCII-safe filename."""
     return "".join(c if c.isascii() and (c.isalnum() or c in "-_") else "_"
                    for c in str(text))
 
 
 def create_result_paths(serial):
-    """Construit les chemins des fichiers de résultats du test USB."""
+    """Build output paths for the USB test result files."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tag = f"{stamp}_{sanitize_filename(serial)}"
 
@@ -1021,7 +1022,7 @@ def create_result_paths(serial):
 
 
 def build_device_info_text(info):
-    """Met en forme les informations du périphérique pour le rapport."""
+    """Build the formatted device-information text for the report."""
     labels = (
         ("Date", "Date"),
         ("Model", "Model"),
@@ -1042,7 +1043,7 @@ def build_device_info_text(info):
 
 
 def get_failure_reasons(result):
-    """Retourne les motifs de non-conformité du test."""
+    """Return the qualification failure reasons."""
     reasons = []
 
     if result.get("error"):
@@ -1152,18 +1153,42 @@ def append_usb2_report(lines, result):
         )
 
     lines.append("")
- 
+
+
+def append_test_link_report(lines, result):
+    """Append test-link information to the report."""
+
+    test_link = result.get("test_link", {})
+
+    lines.extend([
+        "=== TEST-LINK ===",
+        f"{'Reference':<20}: "
+        f"{test_link.get('reference', 'N/A')}",
+        f"{'Mating cycle':<20}: "
+        f"{test_link.get('cycles', 'N/A')} / "
+        f"{test_link.get('max_cycles', 'N/A')}",
+        "",
+    ])
+
 
 def build_report(info, result):
-    """Construit le rapport textuel du test USB."""
-    lines = [
+    """Build the textual USB qualification report."""
+
+    lines = []
+
+    append_test_link_report(
+        lines,
+        result,
+    )
+
+    lines.extend([
         build_device_info_text(info),
         "",
         "=== PERFORMANCE ===",
         "",
-    ]
+    ])
 
-    # Performances
+    # Performance
     for label, avg, intra, inter in (
         (
             "Write",
@@ -1215,7 +1240,7 @@ def build_report(info, result):
 
         lines.append("")
 
-    # Intégrité
+    # Integrity
     lines.extend([
         "=== INTEGRITY ===",
         f"{'Integrity errors ':<20}: "
@@ -1225,17 +1250,17 @@ def build_report(info, result):
 
     append_vbus_report(lines, result)
 
-    # Reformatage
+    # Reformatting
     lines.extend([
         "=== REFORMATTING ===",
         result.get("reformat", "N/A"),
         "",
     ])
 
-    # Résultat test de fallback usb2
+    # USB 2.0 fallback result
     append_usb2_report(lines, result)
 
-    # Verdict final
+    # Final verdict
     lines.extend([
         "================= FINAL RESULT =================",
         "",
@@ -1272,7 +1297,7 @@ def write_docx_report(
     station="USB Tester",
     soft_version="TBD",
 ):
-    """Génère le rapport DOCX avec le texte et le graphique du test."""
+    """Generate the DOCX report containing test text and graph."""
 
     template_path = Path(template_path)
     output_path = Path(output_path)
@@ -1301,15 +1326,15 @@ def write_docx_report(
     found_graph = False
 
     def replace_placeholder(paragraph, key, value):
-        """Remplace un placeholder en conservant les runs non concernés."""
+        """Replace a placeholder while preserving unaffected runs."""
 
-        # Cas courant : le placeholder est dans un seul run.
+        # Common case: the placeholder is contained in a single run.
         for run in paragraph.runs:
             if key in run.text:
                 run.text = run.text.replace(key, str(value))
                 return True
 
-        # Cas où Word a réparti le placeholder sur plusieurs runs.
+        # Case where Word split the placeholder across multiple runs.
         if key in paragraph.text:
             paragraph.text = paragraph.text.replace(key, str(value))
             return True
@@ -1383,7 +1408,7 @@ def write_docx_report(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Enregistrer d'abord dans un fichier temporaire.
+    # Save to a temporary file first.
     temp_path = output_path.with_name(
         output_path.stem + ".tmp.docx"
     )
@@ -1395,7 +1420,7 @@ def write_docx_report(
     finally:
         temp_path.unlink(missing_ok=True)
 
-    # Conversion DOCX -> PDF avec LibreOffice.
+    # Convert DOCX to PDF using LibreOffice.
     subprocess.run(
         [
             "libreoffice",
@@ -1414,7 +1439,7 @@ def write_docx_report(
 
 
 # ============================================================
-# 8. GESTION DES COMPTEURS D'USURE DES TEST-LINKS
+# 9. TEST-LINK WEAR COUNTERS
 # ============================================================
 
 def load_test_link_counters():

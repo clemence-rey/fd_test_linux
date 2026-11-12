@@ -102,32 +102,33 @@ class UsbTestService:
 
     def _execute_test_sequence(self):
         """
-        Exécute le test USB complet.
-        Déroulement :
-            1. Identifier et préparer le périphérique.
-            2. Préparer les données et les fichiers de mesure.
-            3. Exécuter les cycles d'écriture et de lecture.
-            4. Calculer les performances et le verdict.
-            5. Reformater la clé si le test n'a pas été interrompu.
+        Execute the complete USB test sequence.
 
-        Les E/S sont réalisées directement sur le périphérique avec O_DIRECT.
+        Sequence:
+            1. Identify and prepare the device.
+            2. Prepare test data and measurement files.
+            3. Execute write and read cycles.
+            4. Compute performance statistics and verdict.
+            5. Reformat the device if the test was not interrupted.
+
+        I/O operations are performed directly on the block device using O_DIRECT.
         """
         devnode = self.devnode
         self._emit_phase(TestPhase.OTHER)
 
-        # IDENTIFICATION ET PRÉPARATION DU PÉRIPHÉRIQUE
+        # DEVICE IDENTIFICATION AND PREPARATION
 
-        # Vérifier que la clé sélectionnée n'a pas été remplacée.
+        # Verify that the selected DUT has not been replaced.
         assert_expected_test_device(devnode, self.expected_diskseq)
 
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Récupérer les informations du périphérique.
+        # Retrieve device information.
         self.emit_status("Reading device information...")
         info = get_device_info(devnode)
         self.device_info = info.copy()
 
-        # Initialiser les résultats et les chemins des rapports.
+        # Initialize the result structure and output paths.
         result = create_test_result(devnode)
         self.current_result = result
         result["model"] = info["Model"]
@@ -136,11 +137,11 @@ class UsbTestService:
 
         self.emit_device_info(build_device_info_text(info))
 
-        # Démonter les partitions pour accéder directement au disque.
+        # Unmount partitions before direct raw access.
         self.emit_status("Unmounting / raw access to the device...")
         unmount_device(devnode)
 
-        # Vérifier que la capacité permet d'exécuter le test.
+        # Verify that the device capacity is sufficient for the test.
         try:
             device_size = get_device_size_bytes(devnode)
         except Exception as e:
@@ -151,14 +152,14 @@ class UsbTestService:
         if device_size < FILE_SIZE * 1.1:
             raise RuntimeError("The device's storage is too small for this test")
 
-        # PRÉPARATION DES DONNÉES ET DES MESURES
+        # TEST DATA AND MEASUREMENT PREPARATION
 
-        # Générer un bloc de référence utilisé pour toutes les écritures.
-        # Son empreinte SHA-256 servira à vérifier les données relues.
+        # Generate one reference block used for all write operations.
+        # Its SHA-256 hash is used to verify the read-back data.
         reference_bytes = os.urandom(BLOCK_SIZE)
         reference_hash = hashlib.sha256(reference_bytes).digest()
 
-        # Compteurs et statistiques du test.
+        # Test counters and statistics.
         errors = 0
         total_written = total_read = 0
         write_io_time = read_io_time = 0.0
@@ -171,10 +172,10 @@ class UsbTestService:
         self._last_pct = -1
         io_failed = False
 
-        # Les ressources sont libérées automatiquement en sortie du bloc.
+        # Resources are automatically released when leaving this block.
         with ExitStack() as stack:
 
-            # Buffers alignés en mémoire pour les E/S avec O_DIRECT.
+            # Memory-aligned buffers required by O_DIRECT.
             write_buffer = stack.enter_context(
                 create_aligned_buffer(BLOCK_SIZE, fill=reference_bytes)
             )
@@ -182,7 +183,7 @@ class UsbTestService:
                 create_aligned_buffer(BLOCK_SIZE)
             )
 
-            # Fichier CSV contenant les mesures de chaque bloc.
+            # CSV file containing measurements for each block.
             csv_handle = stack.enter_context(
                 open(result["csv"], "w", newline="", encoding="utf-8")
             )
@@ -193,13 +194,13 @@ class UsbTestService:
                 "Duration_s", "MB/s", "Integrity"
             ])
 
-            # Point de départ du chronométrage global.
+            # Global measurement start time.
             self._global_start = time.perf_counter()
 
-            # EXÉCUTION DES CYCLES D'ÉCRITURE ET DE LECTURE
+            # WRITE AND READ CYCLE EXECUTION
 
-            # Ouverture exclusive du disque avec O_DIRECT.
-            # L'identité du périphérique est également vérifiée.
+            # Open the disk exclusively using O_DIRECT.
+            # The opened device identity is also verified.
             fd = open_test_device(devnode, self.expected_diskseq)
             stack.callback(os.close, fd)
 
@@ -221,7 +222,7 @@ class UsbTestService:
                 cycle += 1
                 self._cycle = cycle
 
-                # Séparer visuellement les cycles sur le graphique.
+                # Visually separate cycles on the graph.
                 if cycle > 1:
                     self.emit_sample(
                         "SEP", float("nan"), float("nan")
@@ -232,7 +233,7 @@ class UsbTestService:
                 else:
                     label_cycle = str(cycle)
 
-                # 3.1 ÉCRITURE
+                # 3.1 WRITE
 
                 self.emit_status(f"Cycle {label_cycle} - WRITE")
                 self._emit_phase(TestPhase.WRITE)
@@ -263,16 +264,16 @@ class UsbTestService:
                 finally:
                     self._emit_phase(TestPhase.OTHER)
 
-                # Ne pas poursuivre après une erreur ou une interruption.
+                # Do not continue after an error or interruption.
                 if io_failed or self.interruption_requested():
                     break
 
-                # En mode durée, ne pas commencer la lecture si
-                # la durée est déjà atteinte après l'écriture.
+                # In duration mode, do not start a read operation
+                # if the test duration was already reached after writing.
                 if TEST_DURATION_MODE == "duration" and self._is_limit_reached():
                     break
 
-                # 3.2 LECTURE ET VÉRIFICATION D'INTÉGRITÉ
+                # 3.2 READ AND INTEGRITY VERIFICATION
 
                 self.emit_status(f"Cycle {label_cycle} - READ")
                 self._emit_phase(TestPhase.READ)
@@ -306,12 +307,12 @@ class UsbTestService:
                     self._emit_phase(TestPhase.OTHER)
 
 
-        # ANNULATION VOLONTAIRE
-        # Les fichiers et le périphérique brut sont maintenant fermés.
+        # USER CANCELLATION
+        # The CSV file and raw device are now closed.
         if self.cancellation_requested():
             return self._cancel_test(result)
 
-        # CALCUL DES STATISTIQUES ET DU VERDICT
+        # STATISTICS AND VERDICT
 
         result.update(
             evaluate_performance_test(
@@ -327,7 +328,7 @@ class UsbTestService:
             )
         )
 
-        # GESTION DES INTERRUPTIONS ET DES ERREURS D'E/S
+        # INTERRUPTION AND I/O ERROR HANDLING
 
         if self.interruption_requested() or io_failed:
             result["result"] = "FAIL"
@@ -336,24 +337,23 @@ class UsbTestService:
             if self.interruption_requested():
                 result["error"] = self.abort_reason()
 
-            # Ne jamais reformater après une interruption ou erreur d'E/S.
+            # Never reformat after an interruption or I/O error.
             result["reformat"] = "NOT PERFORMED (test interrupted)"
             result["device_info"] = info.copy()
             return result
 
-        # REFORMATAGE DU PÉRIPHÉRIQUE
+        # DEVICE REFORMATTING
 
-        # Le reformatage est exécuté même si les débits sont insuffisants.
-        # Un échec du reformatage entraîne un verdict FAIL.
+        # Reformat even when performance thresholds were not met.
+        # A reformatting failure causes the qualification to fail.
         self._run_reformat_step(result)
 
-        # GÉNÉRATION DU RAPPORT FINAL
+        # FINALIZE TEST RESULT
 
         result["device_info"] = info.copy()
         return result
 
-    # --- Exécution des cycles de mesure ---
-
+   
     def _write_cycle(
         self,
         fd,
@@ -365,41 +365,41 @@ class UsbTestService:
         block_measurements,
     ):
         """
-        Écrit séquentiellement les blocs sur le périphérique avec O_DIRECT.
+        Sequentially write blocks to the device using O_DIRECT.
 
-        Pour chaque bloc :
-            - Mesure la durée de l'écriture.
-            - Calcule le débit instantané.
-            - Enregistre la mesure dans le CSV.
-            - Transmet la mesure et la progression à la GUI.
+        For each block:
+            - Measure write duration.
+            - Compute instantaneous throughput.
+            - Store the measurement in the CSV file.
+            - Send the measurement and progress to the GUI.
 
-        Retourne le nombre d'octets écrits et le temps cumulé des E/S.
+        Return the number of bytes written and cumulative I/O time.
         """
 
-        # INITIALISATION DES MESURES
+       # MEASUREMENT INITIALIZATION
         bytes_done = 0
         io_time = 0.0
 
-        # ÉCRITURE SÉQUENTIELLE DES BLOCS
+        # SEQUENTIAL BLOCK WRITES
         for block_number in range(NUMBER_BLOCKS):
 
-            # Arrêter le cycle si une interruption est demandée.
+            # Stop the cycle if an interruption was requested.
             if self.interruption_requested():
                 break
 
-            # ÉCRITURE ET CHRONOMÉTRAGE
+            # WRITE AND TIMING
             t0 = time.perf_counter_ns()
             written = os.writev(fd, [buffer])
             duration = (time.perf_counter_ns() - t0) / 1e9
 
-            # Une écriture partielle est considérée comme une erreur.
+            # A partial write is considered an error.
             if written != BLOCK_SIZE:
                 raise OSError(
                     f"Partial writing at block {block_number} "
                     f"({written}/{BLOCK_SIZE} bytes)"
                 )
 
-            # CALCUL DES PERFORMANCES
+            # PERFORMANCE CALCULATION
             bytes_done += written
             io_time += duration
 
@@ -408,7 +408,7 @@ class UsbTestService:
 
             rel = elapsed()
 
-            # ENREGISTREMENT DES MESURES
+            # STORE MEASUREMENT
             writer.writerow([
                 cycle,
                 "WRITE",
@@ -422,16 +422,16 @@ class UsbTestService:
             self.emit_sample("WRITE", rel, mbps)
             emit_progress("write", block_number)
 
-            # VÉRIFICATION DE LA DURÉE
+            # DURATION CHECK
             if (
                 TEST_DURATION_MODE == "duration"
                 and elapsed() >= TEST_DURATION
             ):
                 break
 
-        # SYNCHRONISATION DES ÉCRITURES
-        # Hors chronométrage des performances.
-        # Ne pas prolonger inutilement un test interrompu.
+        # FLUSH WRITES
+        # Outside performance timing.
+        # Do not unnecessarily extend an interrupted test.
         if not self.interruption_requested():
             os.fsync(fd)
 
@@ -450,50 +450,50 @@ class UsbTestService:
         block_measurements,
     ):
         """
-        Lit séquentiellement les blocs et vérifie leur intégrité.
+        Sequentially read blocks and verify data integrity.
 
-        Pour chaque bloc :
-            - Mesure la durée de lecture avec O_DIRECT.
-            - Calcule le débit instantané.
-            - Vérifie la taille et l'empreinte SHA-256.
-            - Enregistre la mesure dans le CSV.
-            - Transmet la mesure et la progression à la GUI.
+        For each block:
+            - Measure read duration using O_DIRECT.
+            - Compute instantaneous throughput.
+            - Verify block size and SHA-256 hash.
+            - Store the measurement in the CSV file.
+            - Send the measurement and progress to the GUI.
 
-        Retourne les octets lus, le temps d'E/S et les erreurs d'intégrité.
+        Return the number of bytes read, cumulative I/O time and integrity errors.
         """
 
-        # INITIALISATION DES MESURES
+        # MEASUREMENT INITIALIZATION
         bytes_done = 0
         io_time = 0.0
         errors_found = 0
 
-        # LECTURE SÉQUENTIELLE DES BLOCS
+        # SEQUENTIAL BLOCK READS
         for block_number in range(NUMBER_BLOCKS):
 
-            # Arrêter le cycle si une interruption est demandée.
+            # Stop the cycle if an interruption was requested.
             if self.interruption_requested():
                 break
 
-            # LECTURE ET CHRONOMÉTRAGE
+            # READ AND TIMING
             t0 = time.perf_counter_ns()
             n = os.readv(fd, [buffer])
             duration = (time.perf_counter_ns() - t0) / 1e9
 
-            # Une lecture nulle indique une erreur.
+            # A zero-length read is considered an error.
             if n == 0:
                 raise OSError(
                     f"Read operation interrupted at the data block {block_number}"
                 )
 
-            # CALCUL DES PERFORMANCES
+            # PERFORMANCE CALCULATION
             bytes_done += n
             io_time += duration
 
             mbps = compute_mbps(n, duration)
             block_measurements.append((n, duration))
 
-            # VÉRIFICATION DE L'INTÉGRITÉ
-            # Le calcul SHA-256 reste hors du chronométrage des E/S.
+            # INTEGRITY VERIFICATION
+            # SHA-256 computation remains outside I/O timing.
             received_hash = hashlib.sha256(buffer[:n]).digest()
 
             integrity = int(
@@ -504,7 +504,7 @@ class UsbTestService:
             if not integrity:
                 errors_found += 1
 
-            # ENREGISTREMENT DES MESURES
+            # STORE MEASUREMENT
             rel = elapsed()
 
             writer.writerow([
@@ -520,7 +520,7 @@ class UsbTestService:
             self.emit_sample("READ", rel, mbps)
             emit_progress("read", block_number)
 
-            # VÉRIFICATION DE LA DURÉE
+            # DURATION CHECK
             if (
                 TEST_DURATION_MODE == "duration"
                 and elapsed() >= TEST_DURATION
@@ -529,22 +529,21 @@ class UsbTestService:
 
         return bytes_done, io_time, errors_found
 
-    # --- Gestion du temps et de la progression ---
 
     def _get_elapsed(self):
-        """Retourne le temps écoulé depuis le début des mesures (secondes)."""
+        """Return elapsed time since the start of measurements, in seconds."""
         return time.perf_counter() - self._global_start
 
 
     def _is_limit_reached(self):
-        """Indique si la limite de cycles ou de durée du test est atteinte."""
+        """Return whether the configured cycle or duration limit was reached."""
         if TEST_DURATION_MODE == "cycles":
             return self._cycle >= TEST_CYCLES
         return self._get_elapsed() >= TEST_DURATION
 
 
     def _emit_progress(self, phase, block_number):
-        """Transmet à la GUI une progression limitée à 95 % pendant les E/S."""
+        """Send GUI progress limited to 95% during I/O operations."""
 
         if TEST_DURATION_MODE == "cycles":
             fraction = (block_number + 1) / NUMBER_BLOCKS
@@ -566,7 +565,6 @@ class UsbTestService:
             self.emit_progress(pct)
 
 
-    # --- Reformatage et annulation ---
     def _run_reformat_step(self, result):
         """Reformat the DUT and update the test result."""
 
@@ -606,11 +604,11 @@ class UsbTestService:
 
 
     def _cancel_test(self, result):
-        """Nettoie les résultats et tente de restaurer la clé après annulation."""
+        """Clean current results and attempt to restore the DUT after cancellation."""
 
         self.emit_status("Cancellation: Cleaning up files...")
 
-        # Supprimer uniquement les fichiers associés au test courant.
+        # Delete only files associated with the current test.
         for key in ("docx", "csv"):
             path = result.get(key)
 
@@ -620,7 +618,6 @@ class UsbTestService:
                 except OSError as exc:
                     self.emit_status(f"Cannot delete : {exc}")
 
-        # Vérifier l'identité de la clé avant toute opération destructive.
         try:
 
             self.emit_status(

@@ -1,4 +1,4 @@
-"""Surveillance USB et exécution des tests dans des threads Qt indépendants."""
+"""USB monitoring and test execution using independent Qt threads."""
 
 import time
 from datetime import datetime
@@ -109,9 +109,9 @@ class AppController(QObject):
         self.watcher.finished.connect(self._try_finish_shutdown)
         self.watcher.start()
 
-        # --- Gestion des états de l'interface ---
+        # --- Interface state management ---
 
-    # --- Surveillance des périphériques USB ---
+    # --- USB device monitoring ---
 
     def on_usb_event(self, devnode, event):
         """Handle insertion and removal of the test device."""
@@ -186,7 +186,7 @@ class AppController(QObject):
                 self.new_device_ready = False
 
     def _get_device_label(self, info):
-        """Construit le libellé du périphérique à partir du fabricant et du modèle."""
+        """Build the device label from manufacturer and model."""
         manufacturer = str(info.get("Manufacturer") or "N/A").strip()
         model = str(info.get("Model") or "N/A").strip()
 
@@ -475,6 +475,8 @@ class AppController(QObject):
 
         result["vbus_error"] = self.vbus_error
 
+        result["test_link"] = self._get_test_link_info()
+
         info = result.get("device_info", {})
 
         result["report"] = build_report(info, result)
@@ -532,22 +534,34 @@ class AppController(QObject):
 
         return True
 
-    def _refresh_test_link_display(self):
-        """Read the selected test-link counter and update the View."""
+    def _get_test_link_info(self):
+        """Return the selected test-link information."""
 
-        test_link = self.test_config["test_link"]
+        reference = self.test_config["test_link"]
         counters = load_test_link_counters()
+        link_data = counters.get(reference, {})
 
-        link_data = counters.get(test_link, {})
-
-        self.view.set_test_link_info(
-            reference=test_link,
-            cycles=link_data.get("cycles", 0),
-            max_cycles=link_data.get(
+        return {
+            "reference": reference,
+            "cycles": link_data.get("cycles", 0),
+            "max_cycles": link_data.get(
                 "max_cycles",
                 MAX_MATING_CYCLES,
             ),
+        }
+
+
+    def _refresh_test_link_display(self):
+        """Update the View with the selected test-link information."""
+
+        test_link = self._get_test_link_info()
+
+        self.view.set_test_link_info(
+            reference=test_link["reference"],
+            cycles=test_link["cycles"],
+            max_cycles=test_link["max_cycles"],
         )
+
 
     def shutdown(self):
         """Request all active workers to stop safely."""
@@ -682,11 +696,11 @@ class AppController(QObject):
             adapter.disconnect()
 
 # ============================================================
-# 1. SURVEILLANCE DES PÉRIPHÉRIQUES USB
+# 1. USB DEVICE MONITORING
 # ============================================================
 
 class UsbWatcher(QThread):
-    """Surveille les changements du périphérique sur le port USB réservé."""
+    """Monitor device changes on the dedicated USB test port."""
 
     usb_event = pyqtSignal(str, str)  # devnode, "inserted" / "removed"
 
@@ -697,13 +711,13 @@ class UsbWatcher(QThread):
   
   
     def run(self):
-        """Surveille les événements USB et détecte rapidement les périphériques."""
+        """Monitor USB events and quickly detect test devices."""
         context = pyudev.Context()
         monitor = pyudev.Monitor.from_netlink(context)
         monitor.filter_by(subsystem="block")
         monitor.start()
 
-        # Détecter une clé déjà branchée au démarrage.
+        # Detect a device that is already connected at startup.
         self._update_device()
 
         scan_pending = False
@@ -715,7 +729,7 @@ class UsbWatcher(QThread):
 
             if device is not None and device.action in ("add", "remove", "change"):
 
-                # Retrait immédiat du disque surveillé.
+                # Immediately report removal of the monitored disk.
                 if (
                     device.action == "remove"
                     and device.device_type == "disk"
@@ -725,17 +739,17 @@ class UsbWatcher(QThread):
                     self._current_devnode = None
                     self._current_diskseq = None
 
-                # Détection immédiate d'un nouveau disque.
+                # Immediately detect a newly added disk.
                 if device.action == "add" and device.device_type == "disk":
                     self._update_device()
 
-                # Prévoir un nouveau scan après stabilisation des événements.
+                # Schedule a new scan after udev events have stabilized.
                 scan_pending = True
                 last_event = time.monotonic()
 
             now = time.monotonic()
 
-            # Scan après stabilisation ou vérification périodique.
+            # Scan after event stabilization or periodically.
             if (scan_pending and now - last_event >= 0.15) or now - last_scan >= 2.0:
                 self._update_device()
                 scan_pending = False
@@ -743,17 +757,17 @@ class UsbWatcher(QThread):
 
 
     def stop(self):
-        """Demande l'arrêt du thread de surveillance."""
+        """Request the monitoring thread to stop."""
         self.requestInterruption()
 
 
     def _scan_device(self):
-        """Retourne le périphérique autorisé et son identité."""
+        """Return the authorized device and its identity."""
         candidates = scan_usb_candidates()
 
         if len(candidates) > 1:
             raise RuntimeError(
-                "Multiple disks detected on the reserved USB porté"
+                "Multiple disks detected on the reserved USB port"
             )
 
         if not candidates:
@@ -770,11 +784,11 @@ class UsbWatcher(QThread):
 
 
     def _update_device(self):
-        """Actualise le périphérique surveillé et signale les changements."""
+        """Update the monitored device and emit detected changes."""
         try:
             devnode, diskseq = self._scan_device()
         except RuntimeError:
-            # Situation ambiguë : ne sélectionner aucun disque.
+            # Ambiguous situation: do not select any disk.
             devnode, diskseq = None, None
 
         if (devnode, diskseq) == (self._current_devnode, self._current_diskseq):
@@ -840,7 +854,7 @@ class VbusWorker(QThread):
         self.requestInterruption()
 
 # ============================================================
-# 3. EXÉCUTION DES TESTS USB
+# 3. USB TEST EXECUTION
 # ============================================================
 
 class TestWorker(QThread):
