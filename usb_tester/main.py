@@ -42,7 +42,6 @@ def ensure_root():
 # 2. APPLICATION INITIALIZATION
 # ============================================================
 
-
 def main():
     """Initialize and run the USB test application."""
 
@@ -58,7 +57,7 @@ def main():
 
     # Configure the test session.
     setup = TestSetupDialog()
-
+    
     if setup.exec_() != QDialog.Accepted:
         sys.exit(0)
 
@@ -79,6 +78,6 @@ def main():
     sys.exit(app.exec_())
 
 
-
+# Application entry point.
 if __name__ == "__main__":
     main()

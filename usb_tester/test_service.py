@@ -1,4 +1,4 @@
-"""USB test execution service."""
+"""USB qualification test services."""
 
 from contextlib import ExitStack
 import hashlib
@@ -45,9 +45,14 @@ from config import (
 
 from acroname import USBExt3cAdapter
 
-from model import TestPhase, PhaseEvent
+from model import TestPhase
 
-class UsbTestService:
+
+# ============================================================
+# 1. USB PERFORMANCE TEST
+# ============================================================
+
+class UsbPerformanceTestService:
     """Execute USB performance, integrity and reformatting tests."""
 
     def __init__(
@@ -80,7 +85,7 @@ class UsbTestService:
 
 
     def run(self):
-        """Execute the complete USB test sequence."""
+        """Execute the USB performance, integrity, and reformatting sequence."""
 
         self.current_result = create_test_result(self.devnode)
         self.device_info = {}
@@ -98,23 +103,25 @@ class UsbTestService:
             return result
 
         finally:
-            self._emit_phase(TestPhase.OTHER)
+            self.emit_phase(TestPhase.OTHER)
+
 
     def _execute_test_sequence(self):
         """
-        Execute the complete USB test sequence.
+        Execute the USB performance test workflow.
 
         Sequence:
             1. Identify and prepare the device.
             2. Prepare test data and measurement files.
             3. Execute write and read cycles.
-            4. Compute performance statistics and verdict.
+            4. Compute performance statistics and integrity verdict.
             5. Reformat the device if the test was not interrupted.
 
         I/O operations are performed directly on the block device using O_DIRECT.
         """
+
         devnode = self.devnode
-        self._emit_phase(TestPhase.OTHER)
+        self.emit_phase(TestPhase.OTHER)
 
         # DEVICE IDENTIFICATION AND PREPARATION
 
@@ -200,7 +207,7 @@ class UsbTestService:
             stack.callback(os.close, fd)
 
             self.emit_status("Measuring idle VBUS...")
-            self._emit_phase(TestPhase.IDLE)
+            self.emit_phase(TestPhase.IDLE)
 
             idle_step_duration = VBUS_IDLE_DURATION_S / 5
 
@@ -211,7 +218,7 @@ class UsbTestService:
                 time.sleep(idle_step_duration)
                 self.emit_progress(progress)
 
-            self._emit_phase(TestPhase.OTHER)
+            self.emit_phase(TestPhase.OTHER)
 
             # Start performance-test timing after the idle phase.
             self._global_start = time.perf_counter()
@@ -240,7 +247,7 @@ class UsbTestService:
                 # 3.1 WRITE
 
                 self.emit_status(f"Cycle {label_cycle} - WRITE")
-                self._emit_phase(TestPhase.WRITE)
+                self.emit_phase(TestPhase.WRITE)
 
                 try:
                     os.lseek(fd, 0, os.SEEK_SET)
@@ -266,7 +273,7 @@ class UsbTestService:
                     set_result_error(result, exc, "Write")
 
                 finally:
-                    self._emit_phase(TestPhase.OTHER)
+                    self.emit_phase(TestPhase.OTHER)
 
                 # Do not continue after an error or interruption.
                 if io_failed or self.interruption_requested():
@@ -280,7 +287,7 @@ class UsbTestService:
                 # 3.2 READ AND INTEGRITY VERIFICATION
 
                 self.emit_status(f"Cycle {label_cycle} - READ")
-                self._emit_phase(TestPhase.READ)
+                self.emit_phase(TestPhase.READ)
 
                 try:
                     os.lseek(fd, 0, os.SEEK_SET)
@@ -308,7 +315,7 @@ class UsbTestService:
                     set_result_error(result, exc, "Read")
 
                 finally:
-                    self._emit_phase(TestPhase.OTHER)
+                    self.emit_phase(TestPhase.OTHER)
 
 
         # USER CANCELLATION
@@ -651,18 +658,12 @@ class UsbTestService:
         return result
 
 
-    def _emit_phase(self, phase):
-        """Publish a timestamped test-phase transition."""
 
-        self.emit_phase(
-            PhaseEvent(
-                timestamp_ns=time.monotonic_ns(),
-                phase=phase,
-            )
-        )
+# ============================================================
+# 2. USB 2.0 FALLBACK TEST
+# ============================================================
 
-
-class Usb2FallbackService:
+class Usb2FallbackTestService:
     """Verify USB 2.0 High-Speed fallback enumeration."""
 
     def __init__(

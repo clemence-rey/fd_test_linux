@@ -433,6 +433,13 @@ class MainWindow(QMainWindow):
         event.ignore()
         self.close_requested.emit()
 
+
+    def show_vbus_error(self, message):
+        """Display a VBUS monitoring error."""
+
+        self.vbus_label.setText(f"VBUS unavailable: {message}")
+
+
     def show_waiting_insert(self):
         """Display the waiting-for-device state."""
 

@@ -21,7 +21,6 @@ from docx import Document
 from docx.shared import Inches
 from datetime import datetime
 
-from bisect import bisect_right
 from dataclasses import dataclass
 from enum import Enum
 
@@ -643,7 +642,7 @@ def reformat_device(devnode, fs_type, label, expected_diskseq):
 # ============================================================
 
 class TestPhase(str, Enum):
-    """Electrical measurement phases used during the USB test."""
+    """Represent the electrical measurement phases."""
 
     IDLE = "IDLE"
     WRITE = "WRITE"
@@ -651,21 +650,14 @@ class TestPhase(str, Enum):
     OTHER = "OTHER"
 
 
-@dataclass(frozen=True)
-class PhaseEvent:
-    """Timestamped transition to a new test phase."""
-
-    timestamp_ns: int
-    phase: TestPhase
-
-
-@dataclass(frozen=True)
+@dataclass
 class VbusSample:
-    """One timestamped VBUS measurement."""
+    """Represent one VBUS measurement."""
 
     timestamp_ns: int
     voltage_v: float
     current_ma: float
+    phase: TestPhase = TestPhase.OTHER
 
 
 # ============================================================
@@ -775,13 +767,8 @@ def _empty_vbus_stats():
     }
 
 
-def compute_vbus_phase_stats(samples, phase_events):
-    """
-    Compute min/average/max voltage and current for IDLE, WRITE and READ.
-
-    Samples are assigned using timestamped phase transitions.
-    Samples acquired during OTHER are ignored.
-    """
+def compute_vbus_phase_stats(samples):
+    """Compute VBUS statistics for IDLE, WRITE and READ phases."""
 
     phase_names = (
         TestPhase.IDLE.value,
@@ -789,47 +776,20 @@ def compute_vbus_phase_stats(samples, phase_events):
         TestPhase.READ.value,
     )
 
-    grouped = {
-        phase_name: []
-        for phase_name in phase_names
-    }
+    grouped = {phase_name: [] for phase_name in phase_names}
 
-    ordered_events = sorted(
-        phase_events,
-        key=lambda event: event.timestamp_ns,
-    )
-
-    if not ordered_events:
-        return {
-            phase_name: _empty_vbus_stats()
-            for phase_name in phase_names
-        }
-
-    event_times = [
-        event.timestamp_ns
-        for event in ordered_events
-    ]
-
-    for sample in sorted(samples, key=lambda item: item.timestamp_ns):
-        event_index = bisect_right(
-            event_times,
-            sample.timestamp_ns,
-        ) - 1
-
-        # No phase had started when this sample was acquired.
-        if event_index < 0:
-            continue
-
-        phase = ordered_events[event_index].phase
-
-        if isinstance(phase, TestPhase):
-            phase_name = phase.value
-        else:
-            phase_name = str(phase)
+    # Group samples directly by their recorded phase.
+    for sample in samples:
+        phase_name = (
+            sample.phase.value
+            if isinstance(sample.phase, TestPhase)
+            else str(sample.phase)
+        )
 
         if phase_name in grouped:
             grouped[phase_name].append(sample)
 
+    # Compute statistics for each test phase.
     statistics = {}
 
     for phase_name, phase_samples in grouped.items():
@@ -837,15 +797,8 @@ def compute_vbus_phase_stats(samples, phase_events):
             statistics[phase_name] = _empty_vbus_stats()
             continue
 
-        voltages = [
-            sample.voltage_v
-            for sample in phase_samples
-        ]
-
-        currents = [
-            sample.current_ma
-            for sample in phase_samples
-        ]
+        voltages = [sample.voltage_v for sample in phase_samples]
+        currents = [sample.current_ma for sample in phase_samples]
 
         statistics[phase_name] = {
             "n": len(phase_samples),
