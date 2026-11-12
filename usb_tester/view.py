@@ -130,19 +130,19 @@ class TestSetupDialog(QDialog):
         # --- Signals ---
 
         self.sap_combo.currentTextChanged.connect(
-            self.update_test_link
+            self._update_test_link_label
         )
 
         self.of_input.textChanged.connect(
-            self.update_validation
+            self._update_start_button_state
         )
 
         # --- Initialisation ---
 
-        self.update_test_link()
-        self.update_validation()
+        self._update_test_link_label()
+        self._update_start_button_state()
 
-    def update_test_link(self):
+    def _update_test_link_label(self):
         """Affiche le test link associé au SAP sélectionné."""
 
         sap = self.sap_combo.currentText()
@@ -151,7 +151,7 @@ class TestSetupDialog(QDialog):
             TEST_LINK_REFS.get(sap, "N/A")
         )
 
-    def update_validation(self):
+    def _update_start_button_state(self):
         """Autorise le démarrage uniquement si l'OF est renseigné."""
 
         valid = bool(self.of_input.text().strip())
@@ -181,7 +181,7 @@ class MainWindow(QMainWindow):
 
     start_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
-    restart_requested = pyqtSignal()
+    new_test_requested = pyqtSignal()
     close_requested = pyqtSignal()
 
     # --- Initialisation de l'interface ---
@@ -316,9 +316,12 @@ class MainWindow(QMainWindow):
         self.status_label.setText(text)
 
 
-    def _set_steps_status(self, text):
-        """Affiche l'étape en cours du test."""
-        self.dev_status_label.setText(f"Step : {text}")
+    def set_step_status(self, text):
+        """Display the current test step."""
+
+        self.dev_status_label.setText(
+            f"Step : {text}"
+        )
 
 
     def _reset_view(self):
@@ -326,7 +329,7 @@ class MainWindow(QMainWindow):
 
         # Informations du test précédent.
         self.set_result_text("")
-        self._set_steps_status("")
+        self.set_step_status("")
 
         # Graphique des performances.
         self._reset_series()
@@ -403,7 +406,7 @@ class MainWindow(QMainWindow):
 
     def on_restart_clicked(self):
         """Notify the Controller that a new test was requested."""
-        self.restart_requested.emit()
+        self.new_test_requested.emit()
 
     def get_report_figure(self):
         """Return the graph used in the final report."""
@@ -445,7 +448,7 @@ class MainWindow(QMainWindow):
 
         self._set_banner(TXT_READY, COLORS["wait"])
         self._set_user_status(device_label)
-        self._set_steps_status(
+        self.set_step_status(
             "Flash drive detected, waiting for START"
         )
 
@@ -481,15 +484,9 @@ class MainWindow(QMainWindow):
             "Do not unplug the flash drive."
         )
 
-        self._set_steps_status(
+        self.set_step_status(
             "Stopping test operations..."
         )
-
-
-    def set_step_status(self, text):
-        """Display the current controller step."""
-
-        self._set_steps_status(text)
 
 
     def set_progress(self, value):
@@ -608,5 +605,5 @@ class MainWindow(QMainWindow):
         self._set_user_status(
             "The flash drive could not be restored."
         )
-        self._set_steps_status(message)
+        self.set_step_status(message)
         self.button_stack.setCurrentWidget(self.restart_button)

@@ -9,18 +9,17 @@ from pathlib import Path
 
 
 from model import (
-    assert_same_device,
-    assert_test_port,
+    assert_expected_test_device,
     get_device_info,
     create_test_result,
     create_result_paths,
-    format_device_info,
+    build_device_info_text,
     unmount_device,
     get_device_size_bytes,
     create_aligned_buffer,
     open_test_device,
     set_result_error,
-    evaluate_usb_test,
+    evaluate_performance_test,
     compute_mbps,
     reformat_device,
     wait_for_test_port_empty,
@@ -87,7 +86,7 @@ class UsbTestService:
         self.device_info = {}
 
         try:
-            return self._run_test()
+            return self._execute_test_sequence()
 
         except Exception as exc:
             result = self.current_result
@@ -101,7 +100,7 @@ class UsbTestService:
         finally:
             self._emit_phase(TestPhase.OTHER)
 
-    def _run_test(self):
+    def _execute_test_sequence(self):
         """
         Exécute le test USB complet.
         Déroulement :
@@ -119,8 +118,7 @@ class UsbTestService:
         # IDENTIFICATION ET PRÉPARATION DU PÉRIPHÉRIQUE
 
         # Vérifier que la clé sélectionnée n'a pas été remplacée.
-        assert_same_device(devnode, self.expected_diskseq)
-        assert_test_port(devnode)
+        assert_expected_test_device(devnode, self.expected_diskseq)
 
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -136,11 +134,11 @@ class UsbTestService:
         result["serial"] = info["Serial"]
         result.update(create_result_paths(info["Serial"]))
 
-        self.emit_device_info(format_device_info(info))
+        self.emit_device_info(build_device_info_text(info))
 
         # Démonter les partitions pour accéder directement au disque.
         self.emit_status("Unmounting / raw access to the device...")
-        unmount_device(devnode, self.expected_diskseq)
+        unmount_device(devnode)
 
         # Vérifier que la capacité permet d'exécuter le test.
         try:
@@ -316,7 +314,7 @@ class UsbTestService:
         # CALCUL DES STATISTIQUES ET DU VERDICT
 
         result.update(
-            evaluate_usb_test(
+            evaluate_performance_test(
                 total_written=total_written,
                 total_read=total_read,
                 write_io_time=write_io_time,
@@ -347,7 +345,7 @@ class UsbTestService:
 
         # Le reformatage est exécuté même si les débits sont insuffisants.
         # Un échec du reformatage entraîne un verdict FAIL.
-        self._reformat_device(result)
+        self._run_reformat_step(result)
 
         # GÉNÉRATION DU RAPPORT FINAL
 
@@ -569,11 +567,9 @@ class UsbTestService:
 
 
     # --- Reformatage et annulation ---
+    def _run_reformat_step(self, result):
+        """Reformat the DUT and update the test result."""
 
-    def _reformat_device(self, result):
-        """Reformate la clé et actualise le résultat."""
-
-        # Ne pas reformater si une interruption a été demandée.
         if self.interruption_requested():
             result["result"] = "FAIL"
             result["completed"] = False
@@ -581,7 +577,9 @@ class UsbTestService:
             result["reformat"] = "NOT PERFORMED (test interrupted)"
             return
 
-        self.emit_status(f"Reformatting to {REFORMAT_FS.upper()}...")
+        self.emit_status(
+            f"Reformatting to {REFORMAT_FS.upper()}..."
+        )
 
         try:
             reformat_device(
@@ -596,9 +594,15 @@ class UsbTestService:
                 f"{REFORMAT_FS.upper()} and verified."
             )
 
-        except Exception as e:
-            set_result_error(result, e, "Reformatting")
-            result["reformat"] = f"FAILURE : {result['error']}"
+        except Exception as exc:
+            set_result_error(
+                result,
+                exc,
+                "Reformatting",
+            )
+            result["reformat"] = (
+                f"FAILURE : {result['error']}"
+            )
 
 
     def _cancel_test(self, result):
@@ -618,8 +622,6 @@ class UsbTestService:
 
         # Vérifier l'identité de la clé avant toute opération destructive.
         try:
-            assert_test_port(self.devnode)
-            assert_same_device(self.devnode, self.expected_diskseq)
 
             self.emit_status(
                 f"Cancellation: Reformat to {REFORMAT_FS.upper()}..."

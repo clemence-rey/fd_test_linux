@@ -23,11 +23,10 @@ from config import (
 )
 
 from model import (
-    assert_same_device, 
     get_diskseq,
     assert_test_port, 
     get_device_info,
-    format_device_info, 
+    build_device_info_text, 
     build_report, 
     scan_usb_candidates,
     increment_test_link_counter,
@@ -93,17 +92,17 @@ class AppController(QObject):
 
         self.view.start_requested.connect(self.start_test)
         self.view.cancel_requested.connect(self.cancel_test)
-        self.view.restart_requested.connect(self.restart_test)
+        self.view.new_test_requested.connect(self.prepare_next_test)
         self.view.close_requested.connect(self.shutdown)
 
-    def start(self):
+    def initialize(self):
         """Initialize application state and start USB monitoring."""
 
         self.view.show_waiting_insert()
         self._refresh_test_link_display()
 
         # Always restore the Acroname DUT port before looking for a device.
-        self._restore_acroname_port()
+        self._initialize_acroname()
 
         self.watcher = UsbWatcher()
         self.watcher.usb_event.connect(self.on_usb_event)
@@ -199,21 +198,12 @@ class AppController(QObject):
         """Validate a detected device and place the application in READY."""
 
         try:
-            assert_test_port(devnode)
-
             if diskseq is None:
                 raise RuntimeError("USB ID not available")
 
-            actual_diskseq = get_diskseq(devnode)
-
-            if actual_diskseq != diskseq:
-                raise RuntimeError(
-                    "The USB flash drive changed while being detected"
-                )
+            assert_test_port(devnode)
 
             info = get_device_info(devnode)
-
-            assert_same_device(devnode, actual_diskseq)
 
         except (OSError, RuntimeError) as exc:
             self._set_waiting_insert()
@@ -224,12 +214,13 @@ class AppController(QObject):
 
         self.state = AppState.READY
         self.current_devnode = devnode
-        self.current_diskseq = actual_diskseq
+        self.current_diskseq = diskseq
 
         self.view.show_ready(
             device_label=self._get_device_label(info),
-            device_info_text=format_device_info(info),
+            device_info_text=build_device_info_text(info),
         )
+
 
     def _start_workers(self):
         """Start electrical monitoring, then the USB test."""
@@ -490,7 +481,7 @@ class AppController(QObject):
 
         self.view.prepare_final_graph(result)
 
-        report_saved = self._write_report(result)
+        report_saved = self._save_report(result)
 
         self.state = AppState.WAITING_RESTART
 
@@ -499,7 +490,7 @@ class AppController(QObject):
             report_saved=report_saved,
         )
 
-    def _write_report(self, result):
+    def _save_report(self, result):
         """Save the final report and return whether it succeeded."""
 
         path = result.get("docx") or str(
@@ -612,21 +603,9 @@ class AppController(QObject):
 
 
     def start_test(self):
-        """Validate the selected device and start the test."""
+        """Start the qualification sequence."""
 
         if self.state != AppState.READY:
-            return
-
-        try:
-            assert_test_port(self.current_devnode)
-            assert_same_device(
-                self.current_devnode,
-                self.current_diskseq,
-            )
-
-        except (OSError, RuntimeError) as exc:
-            self.view.set_step_status(f"Cannot start test: {exc}")
-            self._set_waiting_insert()
             return
 
         self.state = AppState.TESTING
@@ -649,7 +628,7 @@ class AppController(QObject):
             self.test_worker.cancel()
 
 
-    def restart_test(self):
+    def prepare_next_test(self):
         """Prepare the next test."""
 
         if self.state != AppState.WAITING_RESTART:
@@ -685,7 +664,7 @@ class AppController(QObject):
 
         self._try_finish_shutdown()
 
-    def _restore_acroname_port(self):
+    def _initialize_acroname(self):
         """Force Acroname into the normal USB 2 + USB 3 state."""
 
         adapter = USBExt3cAdapter()

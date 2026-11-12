@@ -67,7 +67,7 @@ def main():
     )
 
     view.show()
-    controller.start()
+    controller.initialize()
 
     sys.exit(app.exec_())
 

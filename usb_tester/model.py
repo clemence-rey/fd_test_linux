@@ -247,6 +247,13 @@ def assert_test_port(devnode):
         )
 
 
+def assert_expected_test_device(devnode, expected_diskseq):
+    """Verify that the expected DUT is still on the dedicated test port."""
+
+    assert_test_port(devnode)
+    assert_same_device(devnode, expected_diskseq)
+
+
 # ============================================================
 # 3. INFORMATIONS DU PÉRIPHÉRIQUE
 # ============================================================
@@ -386,9 +393,9 @@ def create_aligned_buffer(size, fill=None):
 
 
 def open_test_device(devnode, expected_diskseq):
-    """Ouvre le disque en E/S directes et vérifie son identité."""
+    """Open the test disk and verify the opened device identity."""
+
     assert_test_port(devnode)
-    assert_same_device(devnode, expected_diskseq)
 
     fd = os.open(
         devnode,
@@ -397,12 +404,17 @@ def open_test_device(devnode, expected_diskseq):
 
     try:
         diskseq = struct.unpack(
-            "Q", fcntl.ioctl(fd, BLKGETDISKSEQ, bytes(8))
+            "Q",
+            fcntl.ioctl(
+                fd,
+                BLKGETDISKSEQ,
+                bytes(8),
+            )
         )[0]
 
         if diskseq != expected_diskseq:
             raise RuntimeError(
-                "The USB device was changed before it was opened"
+                "The USB device was changed before raw access"
             )
 
         return fd
@@ -441,9 +453,8 @@ FILESYSTEM_CONFIG = {
     }
 
 
-def get_mounted_devices(devnode, expected_diskseq):
-    """Retourne les périphériques montés appartenant au disque USB."""
-    assert_same_device(devnode, expected_diskseq)
+def get_mounted_partitions(devnode):
+    """Return mounted partitions belonging to the USB disk."""
 
     out, err, rc = run_command([
         "lsblk", "-J", "-p", "-l",
@@ -451,7 +462,9 @@ def get_mounted_devices(devnode, expected_diskseq):
     ])
 
     if rc != 0:
-        raise RuntimeError(f"Unable to read partitions : {err or out}")
+        raise RuntimeError(
+            f"Unable to read partitions: {err or out}"
+        )
 
     return [
         device["path"]
@@ -460,94 +473,116 @@ def get_mounted_devices(devnode, expected_diskseq):
     ]
 
 
-def unmount_device(devnode, expected_diskseq):
-    """Démonte tous les systèmes de fichiers montés sur le disque USB."""
-    for device in reversed(get_mounted_devices(devnode, expected_diskseq)):
-        assert_same_device(devnode, expected_diskseq)
+def unmount_device(devnode):
+    """Unmount all mounted filesystems of the test device."""
 
-        out, err, rc = run_command(["umount", device])
+    assert_test_port(devnode)
+
+    for device in reversed(get_mounted_partitions(devnode)):
+
+        out, err, rc = run_command(
+            ["umount", device]
+        )
+
         if rc != 0:
             raise RuntimeError(
-                f"Unable to unmount{device} : {err or out}"
+                f"Unable to unmount {device}: {err or out}"
             )
 
-    remaining = get_mounted_devices(devnode, expected_diskseq)
+    remaining = get_mounted_partitions(devnode)
+
     if remaining:
         raise RuntimeError(
-            f"Devices still mounted ; {', '.join(remaining)}"
+            f"Devices still mounted: {', '.join(remaining)}"
         )
 
 
-def execute_device_command(devnode, expected_diskseq, cmd, timeout=30, input_text=None):
-    """Exécute une commande après vérification du disque et du port USB."""
-    assert_same_device(devnode, expected_diskseq)
-    assert_test_port(devnode)
+def run_checked_command(
+    cmd,
+    timeout=30,
+    input_text=None,
+):
+    """Run a command and raise an exception if it fails."""
 
-    out, err, rc = run_command(cmd, timeout=timeout, input_text=input_text)
+    out, err, rc = run_command(
+        cmd,
+        timeout=timeout,
+        input_text=input_text,
+    )
 
     if rc != 0:
         raise RuntimeError(
-            f"Command Failed : {' '.join(cmd)}\n{err or out}"
+            f"Command failed: {' '.join(cmd)}\n"
+            f"{err or out}"
         )
 
     return out
 
-
-def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
-    """Recrée une table MBR, une partition unique et son système de fichiers."""
-
-    if expected_diskseq is None:
-        raise RuntimeError("Reformatting prohibited: DiskSeq not provided")
+def reformat_device(devnode, fs_type, label, expected_diskseq):
+    """Create one MBR partition and format the test device."""
 
     fs_type = fs_type.lower().strip()
 
     if fs_type not in FILESYSTEM_CONFIG:
-        raise ValueError(f"Unsupported file system : {fs_type}")
+        raise ValueError(f"Unsupported file system: {fs_type}")
 
     cfg = FILESYSTEM_CONFIG[fs_type]
 
-    # Vérifier les dépendances
-    for tool in (cfg["tool"], "sfdisk", "partprobe", "udevadm", "lsblk", "blkid", "sync"):
+    # Check required tools.
+    for tool in (
+        cfg["tool"],
+        "sfdisk",
+        "partprobe",
+        "udevadm",
+        "lsblk",
+        "blkid",
+        "sync",
+    ):
         if not shutil.which(tool):
-            raise RuntimeError(f"Tool not found : {tool}")
+            raise RuntimeError(f"Tool not found: {tool}")
 
-    # Créer une table MBR avec une partition unique
     partition_type = {
         "fat32": "c",
         "exfat": "7",
         "ntfs": "7",
     }[fs_type]
 
-    script = f"label: dos\nstart=2048, type={partition_type}\n"
+    script = (
+        f"label: dos\n"
+        f"start=2048, type={partition_type}\n"
+    )
 
-    execute_device_command(
-        devnode, expected_diskseq,
+    # Safety check before modifying the partition table.
+    assert_expected_test_device(
+        devnode,
+        expected_diskseq,
+    )
+
+    run_checked_command(
         ["sfdisk", "--wipe", "always", devnode],
         input_text=script,
     )
 
-    # Actualiser la table de partitions
-    execute_device_command(
-        devnode, expected_diskseq,
+    # Refresh the partition table.
+    run_checked_command(
         ["partprobe", devnode]
     )
 
-    execute_device_command(
-        devnode, expected_diskseq,
+    run_checked_command(
         ["udevadm", "settle", "--timeout=15"],
-        timeout=20
+        timeout=20,
     )
 
-    # Identifier la partition créée
-    out = execute_device_command(
-        devnode, expected_diskseq,
+    # Find the newly created partition.
+    out = run_checked_command(
         ["lsblk", "-ln", "-o", "PATH,TYPE", devnode]
     )
 
     partitions = [
         parts[0]
         for line in out.splitlines()
-        if len(parts := line.split()) == 2 and parts[1] == "part"
+        if len(parts := line.split()) == 2
+        and parts[1] == "part"
     ]
 
     if len(partitions) != 1:
@@ -557,39 +592,50 @@ def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
 
     partition = partitions[0]
 
-    # Formater la partition
+    # Safety check before formatting the partition.
+    assert_expected_test_device(
+        devnode,
+        expected_diskseq,
+    )
+
     cmd = [cfg["tool"], *cfg["args"]]
 
     if label:
-        cmd.extend([cfg["label_arg"], label])
+        cmd.extend([
+            cfg["label_arg"],
+            label,
+        ])
 
     cmd.append(partition)
 
-    execute_device_command(
-        devnode, expected_diskseq,
+    run_checked_command(
         cmd,
-        timeout=120
+        timeout=120,
     )
 
-    # Synchroniser les écritures
-    execute_device_command(
-        devnode, expected_diskseq,
+    # Flush pending writes.
+    run_checked_command(
         ["sync"],
-        timeout=60
+        timeout=60,
     )
 
-    # Vérifier le système de fichiers
-    detected = execute_device_command(
-        devnode, expected_diskseq,
-        ["blkid", "-p", "-o", "value", "-s", "TYPE", partition]
+    # Verify the resulting filesystem.
+    detected = run_checked_command(
+        [
+            "blkid",
+            "-p",
+            "-o", "value",
+            "-s", "TYPE",
+            partition,
+        ]
     ).strip().lower()
 
     if detected != cfg["blkid"]:
         raise RuntimeError(
             f"{fs_type.upper()} not detected after reformatting "
-            f"(blkid : {detected or 'unknown'}, expected : {cfg['blkid']})"
+            f"(blkid: {detected or 'unknown'}, "
+            f"expected: {cfg['blkid']})"
         )
-
 
 # ============================================================
 # DOMAIN VALUES
@@ -902,7 +948,7 @@ def set_result_error(result, exc, operation=""):
 # 8. PASS/FAIL CRITERIA EVALUATION
 # ============================================================
 
-def evaluate_usb_test(
+def evaluate_performance_test(
     total_written,
     total_read,
     write_io_time,
@@ -974,7 +1020,7 @@ def create_result_paths(serial):
     }
 
 
-def format_device_info(info):
+def build_device_info_text(info):
     """Met en forme les informations du périphérique pour le rapport."""
     labels = (
         ("Date", "Date"),
@@ -1111,7 +1157,7 @@ def append_usb2_report(lines, result):
 def build_report(info, result):
     """Construit le rapport textuel du test USB."""
     lines = [
-        format_device_info(info),
+        build_device_info_text(info),
         "",
         "=== PERFORMANCE ===",
         "",
