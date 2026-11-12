@@ -1,21 +1,21 @@
-# Ignorer tout à la racine
+# Ignore everything at repository root
 /*
 
-# Autoriser le dossier usb_tester
+# Allow the usb_tester folder
 !usb_tester/
 
-# Ignorer son contenu
+# Ignore everything inside usb_tester
 usb_tester/*
 
-# Autoriser uniquement les fichiers Python à sa racine
+# Allow Python files at the root of usb_tester
 !usb_tester/*.py
 
-# Autoriser README et requirements
+# Allow README and requirements
 !usb_tester/README.md
 !usb_tester/requirements.txt
 
-# Conserver le .gitignore
-!/.gitignore
+# Allow the report template
+!usb_tester/Report_Template.docx
 
-# Autoriser le template de rapport
-!/Pyhon/usb_tester/Report_Template.docx
+# Keep .gitignore
+!/.gitignore

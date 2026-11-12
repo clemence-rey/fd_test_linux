@@ -1,9 +1,9 @@
-"""Fonctions techniques du test USB : détection, E/S, erreurs et rapports.
-Ce module ne gère ni les threads de test ni l'interface graphique.
+"""Technical USB test functions: detection, I/O, errors and reporting.
+
+This module handles neither test threads nor the graphical interface.
 """
 
 import os
-import sys
 import json
 import errno
 import mmap
@@ -14,26 +14,37 @@ import tempfile
 import subprocess
 import numpy as np
 import pyudev
+import time
 from io import BytesIO
 from pathlib import Path
 from docx import Document
 from docx.shared import Inches
 from datetime import datetime
+
+from bisect import bisect_right
+from dataclasses import dataclass
+from enum import Enum
+
 from config import (
-    USB_TEST_PORT, RESULTS_DIR, MIN_WRITE_MBPS, 
-    MIN_READ_MBPS, MAX_READ_MBPS, TEST_LINK_FILE, 
+    USB_TEST_PORT, 
+    RESULTS_DIR, 
+    MIN_WRITE_MBPS, 
+    MIN_READ_MBPS, 
+    MAX_READ_MBPS, 
+    TEST_LINK_FILE, 
     MAX_MATING_CYCLES
-    )
+)
 
 
 BLKGETDISKSEQ = 0x80081280
 
+
 # ============================================================
-# 1. OUTILS SYSTÈME
+# 1. SYSTEM UTILITIES
 # ============================================================
 
 def run_command(cmd, timeout=20, input_text=None):
-    """Exécute une commande et retourne (stdout, stderr, returncode)."""
+    """Execute a command and return (stdout, stderr, returncode)."""
     try:
         result = subprocess.run(
             cmd,
@@ -49,7 +60,7 @@ def run_command(cmd, timeout=20, input_text=None):
 
     
 def get_root_disk():
-    """Retourne le nom du disque contenant la partition système."""
+    """Return the disk containing the system root partition."""
     source, _, rc = run_command(["findmnt", "-n", "-o", "SOURCE", "/"])
 
     if rc != 0 or not source:
@@ -62,12 +73,13 @@ def get_root_disk():
 
 ROOT_DISK = get_root_disk()
 
+
 # ============================================================
-# 2. DÉTECTION ET IDENTIFICATION USB
+# 2. USB DETECTION AND IDENTIFICATION
 # ============================================================
 
 def scan_usb_candidates():
-    """Liste les disques USB connectés au port de test, hors disque système."""
+    """List USB disks connected to the dedicated test port, excluding the system disk."""
     candidates = []
 
     for dev in pyudev.Context().list_devices(subsystem="block", DEVTYPE="disk"):
@@ -86,12 +98,124 @@ def scan_usb_candidates():
 
 
 def get_usb_parent_device(udev_device):
-    """Retourne le périphérique USB parent (VID/PID)."""
+    """Return the parent USB device containing VID/PID information."""
     return udev_device.find_parent("usb", "usb_device")
 
 
+def get_usb_speed_mbps(devnode):
+    """Return the negotiated USB link speed in Mb/s."""
+
+    udev_device = pyudev.Devices.from_device_file(
+        pyudev.Context(),
+        devnode,
+    )
+
+    usb_device = get_usb_parent_device(udev_device)
+
+    if usb_device is None:
+        raise RuntimeError(
+            "USB parent device not found"
+        )
+
+    speed = (
+        (usb_device.attributes.get("speed") or b"")
+        .decode(errors="ignore")
+        .strip()
+    )
+
+    if not speed:
+        raise RuntimeError(
+            "USB link speed not available"
+        )
+
+    try:
+        return float(speed)
+
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Invalid USB link speed: {speed}"
+        ) from exc
+
+
+def wait_for_test_port_empty(
+    timeout_s,
+    poll_interval_s=0.1,
+):
+    """Wait until no USB disk is detected on the test port."""
+
+    deadline = time.monotonic() + timeout_s
+
+    while time.monotonic() < deadline:
+
+        if not scan_usb_candidates():
+            return
+
+        time.sleep(poll_interval_s)
+
+    raise RuntimeError(
+        "USB device did not disconnect from the test port"
+    )
+
+
+def wait_for_test_device(
+    timeout_s,
+    poll_interval_s=0.1,
+    expected_speed_mbps=None,
+    interruption_requested=None,
+):
+    """Wait for one USB disk to enumerate on the test port."""
+
+    deadline = time.monotonic() + timeout_s
+    last_speed = None
+
+    while time.monotonic() < deadline:
+
+        if (
+            interruption_requested is not None
+            and interruption_requested()
+        ):
+            raise RuntimeError(
+                "USB enumeration interrupted"
+            )
+
+        candidates = scan_usb_candidates()
+
+        if len(candidates) > 1:
+            raise RuntimeError(
+                "Multiple USB disks detected on the test port"
+            )
+
+        if len(candidates) == 1:
+            devnode = candidates[0]
+
+            if expected_speed_mbps is None:
+                return devnode, get_usb_speed_mbps(devnode)
+
+            try:
+                last_speed = get_usb_speed_mbps(devnode)
+
+            except (OSError, RuntimeError):
+                time.sleep(poll_interval_s)
+                continue
+
+            if abs(last_speed - expected_speed_mbps) < 1.0:
+                return devnode, last_speed
+
+        time.sleep(poll_interval_s)
+
+    if last_speed is not None:
+        raise RuntimeError(
+            f"USB device enumerated at {last_speed:g} Mb/s "
+            f"instead of {expected_speed_mbps:g} Mb/s"
+        )
+
+    raise RuntimeError(
+        "USB device enumeration timeout"
+    )
+
+
 def get_diskseq(devnode):
-    """Retourne le DISKSEQ du périphérique pour identifier son instance."""
+    """Return the DISKSEQ identifying the current device instance."""
     try:
         device = pyudev.Devices.from_device_file(pyudev.Context(), devnode)
         return int(device.properties["DISKSEQ"])
@@ -103,7 +227,7 @@ def get_diskseq(devnode):
 
 
 def assert_same_device(devnode, expected_diskseq):
-    """Vérifie que le périphérique n'a pas été remplacé."""
+    """Verify that the device has not been replaced."""
     current_diskseq = get_diskseq(devnode)
 
     if current_diskseq != expected_diskseq:
@@ -114,7 +238,7 @@ def assert_same_device(devnode, expected_diskseq):
 
 
 def assert_test_port(devnode):
-    """Vérifie que le périphérique utilise le port USB réservé."""
+    """Verify that the device is connected to the dedicated USB test port."""
     dev = pyudev.Devices.from_device_file(pyudev.Context(), devnode)
     id_path = dev.get("ID_PATH", "")
 
@@ -123,12 +247,20 @@ def assert_test_port(devnode):
             f"Unauthorized port : {devnode} (ID_PATH={id_path})"
         )
 
+
+def assert_expected_test_device(devnode, expected_diskseq):
+    """Verify that the expected DUT is still on the dedicated test port."""
+
+    assert_test_port(devnode)
+    assert_same_device(devnode, expected_diskseq)
+
+
 # ============================================================
-# 3. INFORMATIONS DU PÉRIPHÉRIQUE
+# 3. DEVICE INFORMATION
 # ============================================================
 
 def get_device_info(devnode):
-    """Récupère les informations du périphérique via lsblk et pyudev."""
+    """Retrieve device information using lsblk and pyudev."""
     info = {
         "Devnode": devnode,
         "Model": "N/A",
@@ -141,7 +273,7 @@ def get_device_info(devnode):
         "Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    # Informations du disque via lsblk
+    # Disk information from lsblk
     lb = get_lsblk_info(devnode)
 
     info["Model"] = lb.get("model") or "N/A"
@@ -154,7 +286,7 @@ def get_device_info(devnode):
     except (ValueError, TypeError):
         pass
 
-    # Informations USB via pyudev
+    # USB information from pyudev
     try:
         udev_dev = pyudev.Devices.from_device_file(pyudev.Context(), devnode)
         usb_dev = get_usb_parent_device(udev_dev)
@@ -196,7 +328,7 @@ def get_device_info(devnode):
 
 
 def get_lsblk_info(devnode):
-    """Retourne les informations du disque fournies par lsblk."""
+    """Return disk information reported by lsblk."""
     out, _, rc = run_command([
         "lsblk", "-b", "-J", "-o", "NAME,MODEL,SERIAL,SIZE,VENDOR", devnode
     ])
@@ -211,7 +343,7 @@ def get_lsblk_info(devnode):
 
 
 def get_usb_speed_label(speed_mbps):
-    """Convertit une vitesse USB en Mb/s en libellé lisible."""
+    """Convert a USB link speed into a human-readable label."""
     try:
         speed = float(speed_mbps)
     except (TypeError, ValueError):
@@ -234,7 +366,7 @@ def get_usb_speed_label(speed_mbps):
 
 
 def get_device_size_bytes(devnode):
-    """Retourne la capacité du périphérique bloc en octets."""
+    """Return the block device capacity in bytes."""
     out, _, rc = run_command(["blockdev", "--getsize64", devnode])
 
     if rc == 0 and out.isdigit():
@@ -246,12 +378,13 @@ def get_device_size_bytes(devnode):
     finally:
         os.close(fd)
 
+
 # ============================================================
-# 4. ACCÈS DIRECT AU PÉRIPHÉRIQUE
+# 4. DIRECT DEVICE ACCESS
 # ============================================================
 
 def create_aligned_buffer(size, fill=None):
-    """Crée un buffer mmap aligné en mémoire, compatible avec O_DIRECT."""
+    """Create an aligned mmap buffer compatible with O_DIRECT."""
     buf = mmap.mmap(-1, size)
 
     if fill is not None:
@@ -261,9 +394,9 @@ def create_aligned_buffer(size, fill=None):
 
 
 def open_test_device(devnode, expected_diskseq):
-    """Ouvre le disque en E/S directes et vérifie son identité."""
+    """Open the test disk and verify the opened device identity."""
+
     assert_test_port(devnode)
-    assert_same_device(devnode, expected_diskseq)
 
     fd = os.open(
         devnode,
@@ -272,12 +405,17 @@ def open_test_device(devnode, expected_diskseq):
 
     try:
         diskseq = struct.unpack(
-            "Q", fcntl.ioctl(fd, BLKGETDISKSEQ, bytes(8))
+            "Q",
+            fcntl.ioctl(
+                fd,
+                BLKGETDISKSEQ,
+                bytes(8),
+            )
         )[0]
 
         if diskseq != expected_diskseq:
             raise RuntimeError(
-                "The USB device was changed before it was opened"
+                "The USB device was changed before raw access"
             )
 
         return fd
@@ -286,8 +424,9 @@ def open_test_device(devnode, expected_diskseq):
         os.close(fd)
         raise
 
+
 # ============================================================
-# 5. GESTION DES PARTITIONS ET REFORMATAGE
+# 5. PARTITIONING AND REFORMATTING
 # ============================================================
 
 FILESYSTEM_CONFIG = {
@@ -315,9 +454,8 @@ FILESYSTEM_CONFIG = {
     }
 
 
-def get_mounted_devices(devnode, expected_diskseq):
-    """Retourne les périphériques montés appartenant au disque USB."""
-    assert_same_device(devnode, expected_diskseq)
+def get_mounted_partitions(devnode):
+    """Return mounted partitions belonging to the USB disk."""
 
     out, err, rc = run_command([
         "lsblk", "-J", "-p", "-l",
@@ -325,7 +463,9 @@ def get_mounted_devices(devnode, expected_diskseq):
     ])
 
     if rc != 0:
-        raise RuntimeError(f"Unable to read partitions : {err or out}")
+        raise RuntimeError(
+            f"Unable to read partitions: {err or out}"
+        )
 
     return [
         device["path"]
@@ -334,94 +474,116 @@ def get_mounted_devices(devnode, expected_diskseq):
     ]
 
 
-def unmount_device(devnode, expected_diskseq):
-    """Démonte tous les systèmes de fichiers montés sur le disque USB."""
-    for device in reversed(get_mounted_devices(devnode, expected_diskseq)):
-        assert_same_device(devnode, expected_diskseq)
+def unmount_device(devnode):
+    """Unmount all mounted filesystems of the test device."""
 
-        out, err, rc = run_command(["umount", device])
+    assert_test_port(devnode)
+
+    for device in reversed(get_mounted_partitions(devnode)):
+
+        out, err, rc = run_command(
+            ["umount", device]
+        )
+
         if rc != 0:
             raise RuntimeError(
-                f"Unable to unmount{device} : {err or out}"
+                f"Unable to unmount {device}: {err or out}"
             )
 
-    remaining = get_mounted_devices(devnode, expected_diskseq)
+    remaining = get_mounted_partitions(devnode)
+
     if remaining:
         raise RuntimeError(
-            f"Devices still mounted ; {', '.join(remaining)}"
+            f"Devices still mounted: {', '.join(remaining)}"
         )
 
 
-def execute_device_command(devnode, expected_diskseq, cmd, timeout=30, input_text=None):
-    """Exécute une commande après vérification du disque et du port USB."""
-    assert_same_device(devnode, expected_diskseq)
-    assert_test_port(devnode)
+def run_checked_command(
+    cmd,
+    timeout=30,
+    input_text=None,
+):
+    """Run a command and raise an exception if it fails."""
 
-    out, err, rc = run_command(cmd, timeout=timeout, input_text=input_text)
+    out, err, rc = run_command(
+        cmd,
+        timeout=timeout,
+        input_text=input_text,
+    )
 
     if rc != 0:
         raise RuntimeError(
-            f"Command Failed : {' '.join(cmd)}\n{err or out}"
+            f"Command failed: {' '.join(cmd)}\n"
+            f"{err or out}"
         )
 
     return out
 
-
-def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
-    """Recrée une table MBR, une partition unique et son système de fichiers."""
-
-    if expected_diskseq is None:
-        raise RuntimeError("Reformatting prohibited: DiskSeq not provided")
+def reformat_device(devnode, fs_type, label, expected_diskseq):
+    """Create one MBR partition and format the test device."""
 
     fs_type = fs_type.lower().strip()
 
     if fs_type not in FILESYSTEM_CONFIG:
-        raise ValueError(f"Unsupported file system : {fs_type}")
+        raise ValueError(f"Unsupported file system: {fs_type}")
 
     cfg = FILESYSTEM_CONFIG[fs_type]
 
-    # Vérifier les dépendances
-    for tool in (cfg["tool"], "sfdisk", "partprobe", "udevadm", "lsblk", "blkid", "sync"):
+    # Check required tools.
+    for tool in (
+        cfg["tool"],
+        "sfdisk",
+        "partprobe",
+        "udevadm",
+        "lsblk",
+        "blkid",
+        "sync",
+    ):
         if not shutil.which(tool):
-            raise RuntimeError(f"Tool not found : {tool}")
+            raise RuntimeError(f"Tool not found: {tool}")
 
-    # Créer une table MBR avec une partition unique
     partition_type = {
         "fat32": "c",
         "exfat": "7",
         "ntfs": "7",
     }[fs_type]
 
-    script = f"label: dos\nstart=2048, type={partition_type}\n"
+    script = (
+        f"label: dos\n"
+        f"start=2048, type={partition_type}\n"
+    )
 
-    execute_device_command(
-        devnode, expected_diskseq,
+    # Safety check before modifying the partition table.
+    assert_expected_test_device(
+        devnode,
+        expected_diskseq,
+    )
+
+    run_checked_command(
         ["sfdisk", "--wipe", "always", devnode],
         input_text=script,
     )
 
-    # Actualiser la table de partitions
-    execute_device_command(
-        devnode, expected_diskseq,
+    # Refresh the partition table.
+    run_checked_command(
         ["partprobe", devnode]
     )
 
-    execute_device_command(
-        devnode, expected_diskseq,
+    run_checked_command(
         ["udevadm", "settle", "--timeout=15"],
-        timeout=20
+        timeout=20,
     )
 
-    # Identifier la partition créée
-    out = execute_device_command(
-        devnode, expected_diskseq,
+    # Find the newly created partition.
+    out = run_checked_command(
         ["lsblk", "-ln", "-o", "PATH,TYPE", devnode]
     )
 
     partitions = [
         parts[0]
         for line in out.splitlines()
-        if len(parts := line.split()) == 2 and parts[1] == "part"
+        if len(parts := line.split()) == 2
+        and parts[1] == "part"
     ]
 
     if len(partitions) != 1:
@@ -431,52 +593,94 @@ def reformat_device(devnode, fs_type, label="", expected_diskseq=None):
 
     partition = partitions[0]
 
-    # Formater la partition
+    # Safety check before formatting the partition.
+    assert_expected_test_device(
+        devnode,
+        expected_diskseq,
+    )
+
     cmd = [cfg["tool"], *cfg["args"]]
 
     if label:
-        cmd.extend([cfg["label_arg"], label])
+        cmd.extend([
+            cfg["label_arg"],
+            label,
+        ])
 
     cmd.append(partition)
 
-    execute_device_command(
-        devnode, expected_diskseq,
+    run_checked_command(
         cmd,
-        timeout=120
+        timeout=120,
     )
 
-    # Synchroniser les écritures
-    execute_device_command(
-        devnode, expected_diskseq,
+    # Flush pending writes.
+    run_checked_command(
         ["sync"],
-        timeout=60
+        timeout=60,
     )
 
-    # Vérifier le système de fichiers
-    detected = execute_device_command(
-        devnode, expected_diskseq,
-        ["blkid", "-p", "-o", "value", "-s", "TYPE", partition]
+    # Verify the resulting filesystem.
+    detected = run_checked_command(
+        [
+            "blkid",
+            "-p",
+            "-o", "value",
+            "-s", "TYPE",
+            partition,
+        ]
     ).strip().lower()
 
     if detected != cfg["blkid"]:
         raise RuntimeError(
             f"{fs_type.upper()} not detected after reformatting "
-            f"(blkid : {detected or 'unknown'}, expected : {cfg['blkid']})"
+            f"(blkid: {detected or 'unknown'}, "
+            f"expected: {cfg['blkid']})"
         )
 
 # ============================================================
-# 6. CALCULS ET STATISTIQUES
+# DOMAIN VALUES
+# ============================================================
+
+class TestPhase(str, Enum):
+    """Electrical measurement phases used during the USB test."""
+
+    IDLE = "IDLE"
+    WRITE = "WRITE"
+    READ = "READ"
+    OTHER = "OTHER"
+
+
+@dataclass(frozen=True)
+class PhaseEvent:
+    """Timestamped transition to a new test phase."""
+
+    timestamp_ns: int
+    phase: TestPhase
+
+
+@dataclass(frozen=True)
+class VbusSample:
+    """One timestamped VBUS measurement."""
+
+    timestamp_ns: int
+    voltage_v: float
+    current_ma: float
+
+
+# ============================================================
+# 6. CALCULATIONS AND STATISTICS
 # ============================================================
 
 def compute_mbps(byte_count, duration):
-    """Calcule le débit en MB/s à partir des octets transférés et de la durée."""
+    """Compute throughput in MB/s from transferred bytes and duration."""
     if duration <= 0:
         return 0.0
     return byte_count / duration / 1e6
 
 
 def compute_inter_cycle_stats(cycle_measurements):
-    """Calcule la dispersion des débits moyens entre les cycles."""
+    """Compute the dispersion of average speeds between test cycles."""
 
     cycles = []
 
@@ -516,7 +720,7 @@ def compute_inter_cycle_stats(cycle_measurements):
 
 
 def compute_intra_cycle_stats(cycle_measurements):
-    """Calcule la dispersion des débits des blocs au sein des cycles."""
+    """Compute block-speed dispersion within test cycles."""
 
     total_bytes = 0
     total_time = 0.0
@@ -556,12 +760,112 @@ def compute_intra_cycle_stats(cycle_measurements):
         "cv": std / global_mean * 100 if global_mean > 0 else None,
     }
 
+
+def _empty_vbus_stats():
+    """Return an empty but structurally complete VBUS result."""
+
+    return {
+        "n": 0,
+        "voltage_min": None,
+        "voltage_avg": None,
+        "voltage_max": None,
+        "current_min": None,
+        "current_avg": None,
+        "current_max": None,
+    }
+
+
+def compute_vbus_phase_stats(samples, phase_events):
+    """
+    Compute min/average/max voltage and current for IDLE, WRITE and READ.
+
+    Samples are assigned using timestamped phase transitions.
+    Samples acquired during OTHER are ignored.
+    """
+
+    phase_names = (
+        TestPhase.IDLE.value,
+        TestPhase.WRITE.value,
+        TestPhase.READ.value,
+    )
+
+    grouped = {
+        phase_name: []
+        for phase_name in phase_names
+    }
+
+    ordered_events = sorted(
+        phase_events,
+        key=lambda event: event.timestamp_ns,
+    )
+
+    if not ordered_events:
+        return {
+            phase_name: _empty_vbus_stats()
+            for phase_name in phase_names
+        }
+
+    event_times = [
+        event.timestamp_ns
+        for event in ordered_events
+    ]
+
+    for sample in sorted(samples, key=lambda item: item.timestamp_ns):
+        event_index = bisect_right(
+            event_times,
+            sample.timestamp_ns,
+        ) - 1
+
+        # No phase had started when this sample was acquired.
+        if event_index < 0:
+            continue
+
+        phase = ordered_events[event_index].phase
+
+        if isinstance(phase, TestPhase):
+            phase_name = phase.value
+        else:
+            phase_name = str(phase)
+
+        if phase_name in grouped:
+            grouped[phase_name].append(sample)
+
+    statistics = {}
+
+    for phase_name, phase_samples in grouped.items():
+        if not phase_samples:
+            statistics[phase_name] = _empty_vbus_stats()
+            continue
+
+        voltages = [
+            sample.voltage_v
+            for sample in phase_samples
+        ]
+
+        currents = [
+            sample.current_ma
+            for sample in phase_samples
+        ]
+
+        statistics[phase_name] = {
+            "n": len(phase_samples),
+            "voltage_min": min(voltages),
+            "voltage_avg": sum(voltages) / len(voltages),
+            "voltage_max": max(voltages),
+            "current_min": min(currents),
+            "current_avg": sum(currents) / len(currents),
+            "current_max": max(currents),
+        }
+
+    return statistics
+
+
 # ============================================================
-# 7. GESTION DES RÉSULTATS ET DES ERREURS
+# 7. RESULT AND ERROR HANDLING
 # ============================================================
 
 def create_test_result(devnode):
-    """Initialise le dictionnaire des mesures et du verdict du test."""
+    """Initialize the measurement and qualification result structure."""
     return {
         "devnode": devnode,
         "model": "N/A",
@@ -581,12 +885,18 @@ def create_test_result(devnode):
         "error_detail": "",
         "result": "FAIL",
         "reformat": "",
+        "usb2_test": {
+            "result": "NOT PERFORMED",
+            "speed_mbps": None,
+            "devnode": "",
+            "error": "",
+        },
         "completed": False,
     }
 
 
 def classify_error(exc, operation=""):
-    """Convertit une exception en erreur structurée pour le rapport."""
+    """Convert an exception into a structured report error."""
 
     if isinstance(exc, OSError):
         error_map = {
@@ -625,7 +935,7 @@ def classify_error(exc, operation=""):
 
 
 def set_result_error(result, exc, operation=""):
-    """Enregistre une exception et marque le test comme échoué."""
+    """Store an exception and mark the test as failed."""
     error = classify_error(exc, operation)
 
     result["error"] = error["message"]
@@ -634,18 +944,74 @@ def set_result_error(result, exc, operation=""):
     result["result"] = "FAIL"
     result["completed"] = False
 
+
 # ============================================================
-# 8. GÉNÉRATION DES RAPPORTS
+# 8. PASS/FAIL CRITERIA EVALUATION
+# ============================================================
+
+def evaluate_performance_test(
+    total_written,
+    total_read,
+    write_io_time,
+    read_io_time,
+    cycle_write_measurements,
+    cycle_read_measurements,
+    integrity_errors,
+    interrupted,
+    io_failed,
+):
+    """Calculate USB performance statistics and final qualification result."""
+
+    avg_write = compute_mbps(total_written, write_io_time)
+    avg_read = compute_mbps(total_read, read_io_time)
+
+    completed = (
+        not interrupted
+        and not io_failed
+        and total_written > 0
+        and total_read > 0
+    )
+
+    passed = (
+        completed
+        and integrity_errors == 0
+        and avg_write > MIN_WRITE_MBPS
+        and MIN_READ_MBPS < avg_read < MAX_READ_MBPS
+    )
+
+    return {
+        "avg_write": avg_write,
+        "avg_read": avg_read,
+        "write_intra_stats": compute_intra_cycle_stats(
+            cycle_write_measurements
+        ),
+        "read_intra_stats": compute_intra_cycle_stats(
+            cycle_read_measurements
+        ),
+        "write_inter_stats": compute_inter_cycle_stats(
+            cycle_write_measurements
+        ),
+        "read_inter_stats": compute_inter_cycle_stats(
+            cycle_read_measurements
+        ),
+        "errors": integrity_errors,
+        "completed": completed,
+        "result": "PASS" if passed else "FAIL",
+    }
+
+
+# ============================================================
+# 8. REPORT GENERATION
 # ============================================================
 
 def sanitize_filename(text):
-    """Génère un nom de fichier avec des caractères ASCII."""
+    """Generate an ASCII-safe filename."""
     return "".join(c if c.isascii() and (c.isalnum() or c in "-_") else "_"
                    for c in str(text))
 
 
 def create_result_paths(serial):
-    """Construit les chemins des fichiers de résultats du test USB."""
+    """Build output paths for the USB test result files."""
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tag = f"{stamp}_{sanitize_filename(serial)}"
 
@@ -655,8 +1021,8 @@ def create_result_paths(serial):
     }
 
 
-def format_device_info(info):
-    """Met en forme les informations du périphérique pour le rapport."""
+def build_device_info_text(info):
+    """Build the formatted device-information text for the report."""
     labels = (
         ("Date", "Date"),
         ("Model", "Model"),
@@ -677,7 +1043,7 @@ def format_device_info(info):
 
 
 def get_failure_reasons(result):
-    """Retourne les motifs de non-conformité du test."""
+    """Return the qualification failure reasons."""
     reasons = []
 
     if result.get("error"):
@@ -694,6 +1060,20 @@ def get_failure_reasons(result):
     elif result["avg_read"] >= MAX_READ_MBPS:
         reasons.append("Read speed above maximum threshold")
 
+    usb2 = result.get("usb2_test", {})
+
+    if usb2.get("result") == "FAIL":
+        error = usb2.get("error")
+
+        if error:
+            reasons.append(
+                f"USB 2.0 fallback failed: {error}"
+            )
+        else:
+            reasons.append(
+                "USB 2.0 High-Speed enumeration failed"
+            )
+
     if not reasons:
         if result.get("reformat", "").startswith("FAILURE"):
             reasons.append("Reformatting failed (see REFORMATTING section)")
@@ -703,16 +1083,112 @@ def get_failure_reasons(result):
     return reasons
 
 
+def append_vbus_report(lines, result):
+    """Append phase-specific VBUS statistics to report lines."""
+
+    lines.extend([
+        "=== VBUS MEASUREMENTS ===",
+        "",
+    ])
+
+    vbus_error = result.get("vbus_error", "")
+
+    if vbus_error:
+        lines.append(f"Monitoring warning: {vbus_error}")
+        lines.append("")
+
+    stats_by_phase = result.get("vbus_stats", {})
+
+    for phase_name in ("IDLE", "WRITE", "READ"):
+        stats = stats_by_phase.get(phase_name)
+
+        lines.append(phase_name)
+
+        if not stats or stats["n"] == 0:
+            lines.append("  No measurements available")
+            lines.append("")
+            continue
+
+        lines.extend([
+            f"  {'Samples':<18}: {stats['n']}",
+            f"  {'Voltage min':<18}: {stats['voltage_min']:.3f} V",
+            f"  {'Voltage average':<18}: {stats['voltage_avg']:.3f} V",
+            f"  {'Voltage max':<18}: {stats['voltage_max']:.3f} V",
+            f"  {'Current min':<18}: {stats['current_min']:.2f} mA",
+            f"  {'Current average':<18}: {stats['current_avg']:.2f} mA",
+            f"  {'Current max':<18}: {stats['current_max']:.2f} mA",
+            "",
+        ])
+
+
+def append_usb2_report(lines, result):
+    """Append USB 2.0 fallback result to the report."""
+
+    usb2 = result.get("usb2_test", {})
+
+    status = usb2.get(
+        "result",
+        "NOT PERFORMED",
+    )
+
+    lines.extend([
+        "=== USB 2.0 FALLBACK ===",
+        "",
+        f"{'Result':<22}: {status}",
+    ])
+
+    speed = usb2.get("speed_mbps")
+
+    if speed is not None:
+        lines.append(
+            f"{'Negotiated speed':<22}: "
+            f"{speed:g} Mb/s"
+        )
+
+    error = usb2.get("error")
+
+    if error:
+        lines.append(
+            f"{'Error':<22}: {error}"
+        )
+
+    lines.append("")
+
+
+def append_test_link_report(lines, result):
+    """Append test-link information to the report."""
+
+    test_link = result.get("test_link", {})
+
+    lines.extend([
+        "=== TEST-LINK ===",
+        f"{'Reference':<20}: "
+        f"{test_link.get('reference', 'N/A')}",
+        f"{'Mating cycle':<20}: "
+        f"{test_link.get('cycles', 'N/A')} / "
+        f"{test_link.get('max_cycles', 'N/A')}",
+        "",
+    ])
+
+
 def build_report(info, result):
-    """Construit le rapport textuel du test USB."""
-    lines = [
-        format_device_info(info),
+    """Build the textual USB qualification report."""
+
+    lines = []
+
+    append_test_link_report(
+        lines,
+        result,
+    )
+
+    lines.extend([
+        build_device_info_text(info),
         "",
         "=== PERFORMANCE ===",
         "",
-    ]
+    ])
 
-    # Performances
+    # Performance
     for label, avg, intra, inter in (
         (
             "Write",
@@ -764,7 +1240,7 @@ def build_report(info, result):
 
         lines.append("")
 
-    # Intégrité
+    # Integrity
     lines.extend([
         "=== INTEGRITY ===",
         f"{'Integrity errors ':<20}: "
@@ -772,14 +1248,19 @@ def build_report(info, result):
         "",
     ])
 
-    # Reformatage
+    append_vbus_report(lines, result)
+
+    # Reformatting
     lines.extend([
         "=== REFORMATTING ===",
         result.get("reformat", "N/A"),
         "",
     ])
 
-    # Verdict final
+    # USB 2.0 fallback result
+    append_usb2_report(lines, result)
+
+    # Final verdict
     lines.extend([
         "================= FINAL RESULT =================",
         "",
@@ -816,7 +1297,7 @@ def write_docx_report(
     station="USB Tester",
     soft_version="TBD",
 ):
-    """Génère le rapport DOCX avec le texte et le graphique du test."""
+    """Generate the DOCX report containing test text and graph."""
 
     template_path = Path(template_path)
     output_path = Path(output_path)
@@ -845,15 +1326,15 @@ def write_docx_report(
     found_graph = False
 
     def replace_placeholder(paragraph, key, value):
-        """Remplace un placeholder en conservant les runs non concernés."""
+        """Replace a placeholder while preserving unaffected runs."""
 
-        # Cas courant : le placeholder est dans un seul run.
+        # Common case: the placeholder is contained in a single run.
         for run in paragraph.runs:
             if key in run.text:
                 run.text = run.text.replace(key, str(value))
                 return True
 
-        # Cas où Word a réparti le placeholder sur plusieurs runs.
+        # Case where Word split the placeholder across multiple runs.
         if key in paragraph.text:
             paragraph.text = paragraph.text.replace(key, str(value))
             return True
@@ -927,7 +1408,7 @@ def write_docx_report(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Enregistrer d'abord dans un fichier temporaire.
+    # Save to a temporary file first.
     temp_path = output_path.with_name(
         output_path.stem + ".tmp.docx"
     )
@@ -939,7 +1420,7 @@ def write_docx_report(
     finally:
         temp_path.unlink(missing_ok=True)
 
-    # Conversion DOCX -> PDF avec LibreOffice.
+    # Convert DOCX to PDF using LibreOffice.
     subprocess.run(
         [
             "libreoffice",
@@ -956,8 +1437,9 @@ def write_docx_report(
 
     return output_path
 
+
 # ============================================================
-# 8. GESTION DES COMPTEURS D'USURE DES TEST-LINKS
+# 9. TEST-LINK WEAR COUNTERS
 # ============================================================
 
 def load_test_link_counters():
@@ -1015,3 +1497,5 @@ def increment_test_link_counter(test_link):
     save_test_link_counters(counters)
 
     return counters[test_link]["cycles"]
+
+   

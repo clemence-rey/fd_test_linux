@@ -1,22 +1,25 @@
 """
-Point d'entrée du programme de qualification des clés USB.
+Entry point for the USB flash drive qualification program.
 
-Vérifie les privilèges administrateur, initialise l'application Qt
-et lance l'interface graphique.
+Ensures administrator privileges, initializes the Qt application
+and starts the graphical interface.
 """
 
 import sys
 import os
+from pathlib import Path
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QDialog
 
 from view import MainWindow, TestSetupDialog
+from controller import AppController
 
 # ============================================================
-# 1. GESTION DES PRIVILÈGES
+# 1. PRIVILEGE MANAGEMENT
 # ============================================================
 
 def ensure_root():
-    """Relance le programme en root avec authentification graphique."""
+    """Restart the program as root using graphical authentication."""
     if os.geteuid() == 0:
         return
 
@@ -36,19 +39,24 @@ def ensure_root():
 
 
 # ============================================================
-# 2. INITIALISATION DE L'APPLICATION
+# 2. APPLICATION INITIALIZATION
 # ============================================================
 
-def main():
-    """Initialise et exécute l'application de test USB."""
 
-    # Vérification des privilèges administrateur.
+def main():
+    """Initialize and run the USB test application."""
+
+    # Ensure administrator privileges.
     ensure_root()
 
-    # Initialisation de l'application Qt.
+    # Initialize the Qt application.
     app = QApplication(sys.argv)
+    app.setApplicationName("USB Tester")
 
-    # Configuration de la session.
+    icon_path = Path(__file__).resolve().parent.parent / "usb_tester.png"
+    app.setWindowIcon(QIcon(str(icon_path)))
+
+    # Configure the test session.
     setup = TestSetupDialog()
 
     if setup.exec_() != QDialog.Accepted:
@@ -56,12 +64,20 @@ def main():
 
     test_config = setup.get_configuration()
 
-    # Création et affichage de la fenêtre principale.
-    win = MainWindow(test_config)
-    win.show()
+    # Create and display the main window.
+    view = MainWindow()
 
-    # Exécution de la boucle d'événements Qt.
+    controller = AppController(
+        view=view,
+        test_config=test_config,
+        parent=app,
+    )
+
+    view.show()
+    controller.initialize()
+
     sys.exit(app.exec_())
+
 
 
 if __name__ == "__main__":
