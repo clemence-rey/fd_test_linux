@@ -9,10 +9,11 @@ from pathlib import Path
 
 
 # ============================================================
-# BASE PATH
+# BASE PATHS
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path("/home/fischer/Desktop/USB_Tester_release")
 
 
 # ============================================================
@@ -97,8 +98,9 @@ USB2_POLL_INTERVAL_S = 0.1
 # ============================================================
 
 TEMPLATE_PATH = BASE_DIR / "Report_Template.docx"
-RESULTS_DIR = BASE_DIR / "results"
-TEST_LINK_FILE = BASE_DIR / "test_link.json"
+
+RESULTS_DIR = DATA_DIR / "results"
+TEST_LINK_FILE = DATA_DIR / "test_link.json"
 
 
 # ============================================================

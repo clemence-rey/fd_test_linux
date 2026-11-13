@@ -902,4 +902,3 @@ class UsbQualificationWorker(QThread):
         """Request operator cancellation."""
 
         self.cancel_requested = True
-        self.requestInterruption()

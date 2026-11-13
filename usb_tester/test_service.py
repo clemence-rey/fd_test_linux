@@ -129,6 +129,13 @@ class UsbPerformanceTestService:
 
         self.phase_callback(TestPhase.OTHER)
 
+        # Stop immediately if cancellation was requested before test execution.
+        if self.is_cancelled():
+            result["result"] = "CANCELLED"
+            result["completed"] = False
+            result["reformat"] = "NOT PERFORMED (cancelled before test start)"
+            return result
+
         # DEVICE IDENTIFICATION AND PREPARATION
 
         # Verify that the selected DUT has not been replaced.
@@ -218,7 +225,7 @@ class UsbPerformanceTestService:
             idle_step_duration = VBUS_IDLE_DURATION_S / 5
 
             for _ in range(5):
-                if self.is_interrupted():
+                if self.is_interrupted() or self.is_cancelled():
                     break
 
                 time.sleep(idle_step_duration)
@@ -231,8 +238,9 @@ class UsbPerformanceTestService:
             # WRITE AND READ CYCLES
 
             while (
-                not self._is_limit_reached()
+                not self.is_cancelled()
                 and not self.is_interrupted()
+                and not self._is_limit_reached()
                 and not io_failed
             ):
                 cycle += 1
@@ -278,7 +286,7 @@ class UsbPerformanceTestService:
                     self.phase_callback(TestPhase.OTHER)
 
                 # Do not continue after an error or interruption.
-                if io_failed or self.is_interrupted():
+                if io_failed or self.is_interrupted() or self.is_cancelled():
                     break
 
                 # Do not start reading if duration mode already reached its limit.
@@ -318,9 +326,11 @@ class UsbPerformanceTestService:
 
         # USER CANCELLATION
 
-        # The CSV file and raw device are closed at this point.
         if self.is_cancelled():
-            return self._cancel_test(result)
+            return self._handle_cancellation(
+                result,
+                reformat_required=True,
+            )
 
         # STATISTICS AND VERDICT
 
@@ -355,8 +365,14 @@ class UsbPerformanceTestService:
         # Reformat even if performance thresholds were not met.
         self._run_reformat_step(result)
 
-        return result
+        if self.is_cancelled():
+            return self._handle_cancellation(
+                result,
+                reformat_required=False,
+            )
 
+        return result
+    
 
     # --------------------------------------------------------
     # WRITE AND READ OPERATIONS
@@ -382,7 +398,7 @@ class UsbPerformanceTestService:
         # Sequential block writes.
         for block_number in range(NUMBER_BLOCKS):
 
-            if self.is_interrupted():
+            if self.is_interrupted() or self.is_cancelled():
                 break
 
             # Measure raw write duration.
@@ -423,7 +439,7 @@ class UsbPerformanceTestService:
                 break
 
         # Flush writes outside performance timing.
-        if not self.is_interrupted():
+        if not self.is_interrupted() and not self.is_cancelled():
             os.fsync(fd)
 
         return bytes_done, io_time
@@ -451,7 +467,7 @@ class UsbPerformanceTestService:
         # Sequential block reads.
         for block_number in range(NUMBER_BLOCKS):
 
-            if self.is_interrupted():
+            if self.is_interrupted() or self.is_cancelled():
                 break
 
             # Measure raw read duration.
@@ -537,52 +553,51 @@ class UsbPerformanceTestService:
             result["reformat"] = f"FAILURE: {result['error']}"
 
 
-    def _cancel_test(self, result):
-        """Clean test files and restore the DUT after cancellation."""
+    def _handle_cancellation(self, result, reformat_required):
+        """Clean test outputs and finalize operator cancellation."""
+
+        # Mark cancellation immediately.
+        result["result"] = "CANCELLED"
+        result["completed"] = False
+        result["report"] = ""
 
         self.status_callback("Cancellation: Cleaning up files...")
 
-        # Delete files created by the cancelled test.
-        for key in ("docx", "csv"):
+        for key in ("csv", "docx"):
             path = result.get(key)
 
-            if not path:
-                continue
+            if path:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError as exc:
+                    self.status_callback(f"Cannot delete {path}: {exc}")
 
-            try:
-                Path(path).unlink(missing_ok=True)
-
-            except OSError as exc:
-                self.status_callback(f"Cannot delete {path}: {exc}")
-
-        # Restore the DUT to its final formatted state.
-        self.status_callback(
-            f"Cancellation: Reformatting to {REFORMAT_FS.upper()}..."
-        )
-
-        try:
-            reformat_device(
-                self.devnode,
-                REFORMAT_FS,
-                REFORMAT_LABEL,
-                self.expected_diskseq,
+        if reformat_required:
+            self.status_callback(
+                f"Cancellation: Reformatting to {REFORMAT_FS.upper()}..."
             )
 
-        except Exception as exc:
-            result["result"] = "CANCEL_FAILED"
-            result["completed"] = False
-            result["error"] = format_error(exc, "Cancellation reformatting")
-            result["reformat"] = f"FAILURE: {result['error']}"
-            return result
+            try:
+                reformat_device(
+                    self.devnode,
+                    REFORMAT_FS,
+                    REFORMAT_LABEL,
+                    self.expected_diskseq,
+                )
 
-        result["result"] = "CANCELLED"
-        result["completed"] = False
-        result["reformat"] = "OK"
-        result["report"] = ""
+                result["reformat"] = "OK"
+
+            except Exception as exc:
+                result["result"] = "CANCEL_FAILED"
+                result["error"] = format_error(exc, "Cancellation reformatting")
+                result["reformat"] = f"FAILURE: {result['error']}"
+
+        elif not result["reformat"].startswith("OK"):
+            result["result"] = "CANCEL_FAILED"
 
         return result
 
-
+        
     # --------------------------------------------------------
     # INTERNAL HELPERS
     # --------------------------------------------------------

@@ -543,8 +543,9 @@ def reformat_device(devnode, fs_type, label, expected_diskseq):
         f"start=2048, type={config['partition_type']}\n"
     )
 
-    # Verify the DUT before modifying its partition table.
+    # Verify and unmount the DUT before modifying its partition table.
     assert_expected_test_device(devnode, expected_diskseq)
+    unmount_device(devnode)
 
     run_checked_command(
         ["sfdisk", "--wipe", "always", devnode],
