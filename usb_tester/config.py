@@ -20,7 +20,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # ============================================================
 
 STATION_NAME = "Laptop Dell \nLinux 5.15.0-139-generic \nUbuntu 20.04.6 LTS"
-SOFTWARE_VERSION = "1.0"
+SOFTWARE_VERSION = "2.0"
 
 # Dedicated physical USB port used for DUT qualification.
 USB_TEST_PORT = "pci-0000:00:14.0-usb-0:1.1"
