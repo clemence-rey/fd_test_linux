@@ -1,46 +1,48 @@
 """USB monitoring and test execution using independent Qt threads."""
 
+# Standard library
 import time
 from datetime import datetime
 from enum import Enum, auto
-import pyudev
 from threading import Event
-from PyQt5.QtCore import QThread, pyqtSignal, QObject, QTimer
 
+# Third-party libraries
+import pyudev
+from PyQt5.QtCore import QObject, QThread, QTimer, pyqtSignal
 
+# Application configuration
 from config import (
-    RESULTS_DIR, 
-    TEST_DURATION_MODE,
-    TEST_CYCLES, 
-    TEST_DURATION, 
-    REFORMAT_FS, 
-    VBUS_SAMPLE_INTERVAL_S,
-    TEMPLATE_PATH,
-    TEST_FILE_SIZE_MB,
     BLOCK_SIZE_MB,
-    STATION_NAME,
+    MAX_MATING_CYCLES,
+    REFORMAT_FS,
+    RESULTS_DIR,
     SOFTWARE_VERSION,
-    MAX_MATING_CYCLES
+    STATION_NAME,
+    TEMPLATE_PATH,
+    TEST_CYCLES,
+    TEST_DURATION,
+    TEST_DURATION_MODE,
+    TEST_FILE_SIZE_MB,
+    VBUS_SAMPLE_INTERVAL_S,
 )
 
-from model import (
-    get_diskseq,
-    assert_test_port, 
-    get_device_info,
-    build_device_info_text, 
-    build_report, 
-    scan_usb_candidates,
-    increment_test_link_counter,
-    compute_vbus_phase_stats,
-    write_docx_report,
-    load_test_link_counters
-)
-
+# Application modules
 from acroname import USBExt3cAdapter
-
-from model import TestPhase, VbusSample
-
-from test_service import UsbPerformanceTestService, Usb2FallbackTestService
+from model import (
+    TestPhase,
+    VbusSample,
+    assert_test_port,
+    build_device_info_text,
+    build_report,
+    compute_vbus_phase_stats,
+    get_device_info,
+    get_diskseq,
+    increment_test_link_counter,
+    load_test_link_counters,
+    scan_usb_candidates,
+    write_docx_report,
+)
+from test_service import Usb2FallbackTestService, UsbPerformanceTestService
 
 
 # ============================================================
@@ -62,6 +64,10 @@ class AppState(Enum):
 
 class AppController(QObject):
     """Coordinate the USB tester application."""
+
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
 
     def __init__(self, view, test_config, parent=None):
         """Initialize the application controller."""
@@ -91,7 +97,6 @@ class AppController(QObject):
 
         # Initialize worker references.
         self.qualification_worker = None
-        self.qualification_worker_started = False
         self.vbus_worker = None
         self.watcher = None
 
@@ -127,6 +132,51 @@ class AppController(QObject):
         # Start USB monitoring.
         self.watcher.start()
 
+
+    def _initialize_acroname(self):
+        """Restore the Acroname DUT port to normal USB operation."""
+
+        adapter = USBExt3cAdapter()
+
+        try:
+            adapter.connect()
+            adapter.restore_normal_port()
+
+        except Exception as exc:
+            self.view.set_step_status(f"Acroname initialization failed: {exc}")
+
+        finally:
+            adapter.disconnect()
+
+
+    def _get_test_link_info(self):
+        """Return the selected test-link information."""
+
+        reference = self.test_config["test_link"]
+        link_data = load_test_link_counters().get(reference, {})
+
+        return {
+            "reference": reference,
+            "cycles": link_data.get("cycles", 0),
+            "max_cycles": link_data.get("max_cycles", MAX_MATING_CYCLES),
+        }
+
+
+    def _refresh_test_link_display(self):
+        """Update the View with the selected test-link information."""
+
+        test_link = self._get_test_link_info()
+
+        self.view.set_test_link_info(
+            reference=test_link["reference"],
+            cycles=test_link["cycles"],
+            max_cycles=test_link["max_cycles"],
+        )
+
+
+    # --------------------------------------------------------
+    # USB DEVICE MANAGEMENT
+    # --------------------------------------------------------
 
     def on_usb_event(self, devnode, event):
         """Handle insertion and removal events on the dedicated USB test port."""
@@ -234,6 +284,15 @@ class AppController(QObject):
         return label or "Unknown USB device"
 
 
+    def _set_waiting_insert(self):
+        """Return to the initial waiting state."""
+
+        self.state = AppState.WAITING_INSERT
+        self.current_devnode = None
+        self.current_diskseq = None
+        self.view.show_waiting_insert()
+
+
     def _set_ready(self, devnode, diskseq):
         """Validate a detected DUT and place the application in READY state."""
 
@@ -259,6 +318,65 @@ class AppController(QObject):
         )
 
 
+    # --------------------------------------------------------
+    # TEST CONTROL
+    # --------------------------------------------------------
+
+    def start_test(self):
+        """Start the qualification sequence."""
+
+        if self.state != AppState.READY:
+            return
+
+        # Initialize the new qualification state.
+        self.state = AppState.TESTING
+        self.device_removed = False
+        self.new_device_ready = False
+
+        self.view.show_testing()
+        self._start_workers()
+
+
+    def cancel_test(self):
+        """Request cancellation of the running qualification."""
+
+        if self.state != AppState.TESTING:
+            return
+
+        self.view.show_cancelling()
+
+        if self.qualification_worker is not None:
+            self.qualification_worker.cancel()
+
+
+    def prepare_next_test(self):
+        """Prepare the application for the next qualification."""
+
+        if self.state != AppState.WAITING_RESTART:
+            return
+
+        ready_for_next_test = (
+            self.new_device_ready
+            and self.connected_devnode is not None
+        )
+
+        devnode = self.connected_devnode
+        diskseq = self.connected_diskseq
+
+        # Reset the previous qualification state.
+        self.new_device_ready = False
+        self.device_removed = False
+        self._set_waiting_insert()
+
+        # Immediately prepare a DUT that was already reinserted.
+        if ready_for_next_test:
+            self._set_ready(devnode, diskseq)
+
+
+    # --------------------------------------------------------
+    # QUALIFICATION WORKERS
+    # --------------------------------------------------------
+
     def _start_workers(self):
         """Initialize qualification and VBUS workers."""
 
@@ -266,7 +384,6 @@ class AppController(QObject):
         self.vbus_samples = []
         self.vbus_error = ""
         self.current_phase = TestPhase.OTHER
-        self.qualification_worker_started = False
 
         # Initialize the USB qualification worker.
         self.qualification_worker = UsbQualificationWorker(
@@ -302,23 +419,6 @@ class AppController(QObject):
             self.vbus_error = message
             self.view.show_vbus_error(message)
 
-        self._start_qualification_worker()
-
-
-    def _on_vbus_error(self, message):
-        """Record a VBUS monitoring failure."""
-
-        self.vbus_error = message
-        self.view.show_vbus_error(message)
-
-
-    def _start_qualification_worker(self):
-        """Start the USB qualification worker once."""
-
-        if self.qualification_worker_started:
-            return
-
-        self.qualification_worker_started = True
         self.qualification_worker.start()
 
 
@@ -337,6 +437,13 @@ class AppController(QObject):
         # Store and display the measurement.
         self.vbus_samples.append(sample)
         self.view.show_vbus_sample(sample.phase, sample)
+
+
+    def _on_vbus_error(self, message):
+        """Record a VBUS monitoring failure."""
+
+        self.vbus_error = message
+        self.view.show_vbus_error(message)
 
 
     def _on_performance_done(self, run_usb2):
@@ -384,6 +491,10 @@ class AppController(QObject):
 
         self._try_finish_shutdown()
 
+
+    # --------------------------------------------------------
+    # TEST FINALIZATION
+    # --------------------------------------------------------
 
     def _finalize_test(self, result):
         """Finalize the qualification and prepare the final report."""
@@ -464,30 +575,9 @@ class AppController(QObject):
         )
 
 
-    def _get_test_link_info(self):
-        """Return the selected test-link information."""
-
-        reference = self.test_config["test_link"]
-        link_data = load_test_link_counters().get(reference, {})
-
-        return {
-            "reference": reference,
-            "cycles": link_data.get("cycles", 0),
-            "max_cycles": link_data.get("max_cycles", MAX_MATING_CYCLES),
-        }
-
-
-    def _refresh_test_link_display(self):
-        """Update the View with the selected test-link information."""
-
-        test_link = self._get_test_link_info()
-
-        self.view.set_test_link_info(
-            reference=test_link["reference"],
-            cycles=test_link["cycles"],
-            max_cycles=test_link["max_cycles"],
-        )
-
+    # --------------------------------------------------------
+    # APPLICATION SHUTDOWN
+    # --------------------------------------------------------
 
     def shutdown(self):
         """Request all active workers to stop safely."""
@@ -529,73 +619,6 @@ class AppController(QObject):
         self.view.allow_close()
 
 
-    def start_test(self):
-        """Start the qualification sequence."""
-
-        if self.state != AppState.READY:
-            return
-
-        # Initialize the new qualification state.
-        self.state = AppState.TESTING
-        self.device_removed = False
-        self.new_device_ready = False
-
-        self.view.show_testing()
-        self._start_workers()
-
-
-    def cancel_test(self):
-        """Request cancellation of the running qualification."""
-
-        if self.state != AppState.TESTING:
-            return
-
-        self.view.show_cancelling()
-
-        if self.qualification_worker is not None:
-            self.qualification_worker.cancel()
-
-
-    def prepare_next_test(self):
-        """Prepare the application for the next qualification."""
-
-        if self.state != AppState.WAITING_RESTART:
-            return
-
-        ready_for_next_test = (
-            self.new_device_ready
-            and self.connected_devnode is not None
-        )
-
-        devnode = self.connected_devnode
-        diskseq = self.connected_diskseq
-
-        # Reset the previous qualification state.
-        self.new_device_ready = False
-        self.device_removed = False
-        self._set_waiting_insert()
-
-        # Immediately prepare a DUT that was already reinserted.
-        if ready_for_next_test:
-            self._set_ready(devnode, diskseq)
-
-
-    def _initialize_acroname(self):
-        """Restore the Acroname DUT port to normal USB operation."""
-
-        adapter = USBExt3cAdapter()
-
-        try:
-            adapter.connect()
-            adapter.restore_normal_port()
-
-        except Exception as exc:
-            self.view.set_step_status(f"Acroname initialization failed: {exc}")
-
-        finally:
-            adapter.disconnect()
-
-
 # ============================================================
 # 2. USB DEVICE MONITORING
 # ============================================================
@@ -603,22 +626,33 @@ class AppController(QObject):
 class UsbWatcher(QThread):
     """Monitor device changes on the dedicated USB test port."""
 
-    usb_event = pyqtSignal(str, str)  # devnode, "inserted" / "removed"
+    usb_event = pyqtSignal(str, str)  # devnode, event
+
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
 
     def __init__(self):
         super().__init__()
+
         self._current_devnode = None
         self._current_diskseq = None
-  
-  
+
+
+    # --------------------------------------------------------
+    # USB MONITORING
+    # --------------------------------------------------------
+
     def run(self):
-        """Monitor USB events and quickly detect test devices."""
+        """Monitor USB events and detect devices on the test port."""
+
+        # Start block-device monitoring.
         context = pyudev.Context()
         monitor = pyudev.Monitor.from_netlink(context)
         monitor.filter_by(subsystem="block")
         monitor.start()
 
-        # Detect a device that is already connected at startup.
+        # Detect a device already connected at startup.
         self._update_device()
 
         scan_pending = False
@@ -630,7 +664,7 @@ class UsbWatcher(QThread):
 
             if device is not None and device.action in ("add", "remove", "change"):
 
-                # Immediately report removal of the monitored disk.
+                # Immediately report removal of the monitored device.
                 if (
                     device.action == "remove"
                     and device.device_type == "disk"
@@ -640,17 +674,17 @@ class UsbWatcher(QThread):
                     self._current_devnode = None
                     self._current_diskseq = None
 
-                # Immediately detect a newly added disk.
+                # Immediately check newly added disks.
                 if device.action == "add" and device.device_type == "disk":
                     self._update_device()
 
-                # Schedule a new scan after udev events have stabilized.
+                # Recheck after udev events have stabilized.
                 scan_pending = True
                 last_event = time.monotonic()
 
             now = time.monotonic()
 
-            # Scan after event stabilization or periodically.
+            # Recheck after an event or periodically as a fallback.
             if (scan_pending and now - last_event >= 0.15) or now - last_scan >= 2.0:
                 self._update_device()
                 scan_pending = False
@@ -659,17 +693,21 @@ class UsbWatcher(QThread):
 
     def stop(self):
         """Request the monitoring thread to stop."""
+
         self.requestInterruption()
 
 
+    # --------------------------------------------------------
+    # DEVICE DETECTION
+    # --------------------------------------------------------
+
     def _scan_device(self):
         """Return the authorized device and its identity."""
+
         candidates = scan_usb_candidates()
 
         if len(candidates) > 1:
-            raise RuntimeError(
-                "Multiple disks detected on the reserved USB port"
-            )
+            raise RuntimeError("Multiple disks detected on the reserved USB port")
 
         if not candidates:
             return None, None
@@ -685,24 +723,26 @@ class UsbWatcher(QThread):
 
 
     def _update_device(self):
-        """Update the monitored device and emit detected changes."""
+        """Detect device changes and emit insertion or removal events."""
+
         try:
             devnode, diskseq = self._scan_device()
         except RuntimeError:
-            # Ambiguous situation: do not select any disk.
             devnode, diskseq = None, None
 
         if (devnode, diskseq) == (self._current_devnode, self._current_diskseq):
             return
 
+        # Report disappearance of the previously monitored device.
         if self._current_devnode is not None:
             self.usb_event.emit(self._current_devnode, "removed")
 
         self._current_devnode = devnode
         self._current_diskseq = diskseq
 
-        if self._current_devnode is not None:
-            self.usb_event.emit(self._current_devnode, "inserted")
+        # Report detection of the new device.
+        if devnode is not None:
+            self.usb_event.emit(devnode, "inserted")
 
 
 # ============================================================
@@ -712,18 +752,25 @@ class UsbWatcher(QThread):
 class VbusWorker(QThread):
     """Acquire VBUS samples continuously."""
 
+
     initialized = pyqtSignal(bool, str)
     sample_ready = pyqtSignal(object)
     error = pyqtSignal(str)
 
+
+    # --------------------------------------------------------
+    # VBUS MONITORING
+    # --------------------------------------------------------
+
     def run(self):
-        """Connect, sample periodically and disconnect."""
+        """Connect to the Acroname module and acquire VBUS samples."""
 
         adapter = USBExt3cAdapter()
 
         # Connect to the Acroname module.
         try:
             adapter.connect()
+
         except Exception as exc:
             self.initialized.emit(False, str(exc))
             return
@@ -734,9 +781,7 @@ class VbusWorker(QThread):
         try:
             while not self.isInterruptionRequested():
                 start_ns = time.monotonic_ns()
-
                 voltage_v, current_ma = adapter.read_vbus()
-
                 end_ns = time.monotonic_ns()
 
                 sample = VbusSample(
@@ -754,8 +799,10 @@ class VbusWorker(QThread):
         finally:
             adapter.disconnect()
 
+
     def stop(self):
-        """Request clean monitoring termination."""
+        """Request the monitoring thread to stop."""
+
         self.requestInterruption()
 
 
@@ -771,9 +818,13 @@ class UsbQualificationWorker(QThread):
     sample = pyqtSignal(str, float, float)
     progress = pyqtSignal(int)
     phase_changed = pyqtSignal(object)
-
     performance_done = pyqtSignal(bool)
     qualification_done = pyqtSignal(dict)
+
+
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
 
     def __init__(self, devnode, expected_diskseq):
         super().__init__()
@@ -785,11 +836,16 @@ class UsbQualificationWorker(QThread):
         self.abort_reason = "Test interrupted"
         self.vbus_stopped = Event()
 
+
+    # --------------------------------------------------------
+    # QUALIFICATION SEQUENCE
+    # --------------------------------------------------------
+
     def run(self):
-        """Execute performance and USB2 qualification stages."""
+        """Execute the complete USB qualification sequence."""
 
         # Run performance, integrity and reformatting.
-        service = UsbPerformanceTestService(
+        performance_service = UsbPerformanceTestService(
             devnode=self.devnode,
             expected_diskseq=self.expected_diskseq,
             emit_status=self.status.emit,
@@ -802,27 +858,27 @@ class UsbQualificationWorker(QThread):
             abort_reason=lambda: self.abort_reason,
         )
 
-        result = service.run()
+        result = performance_service.run()
 
-        # Determine whether the qualification should continue with USB2.
+        # Continue with USB2 if the first stage completed normally.
         run_usb2 = (
             result["result"] not in ("CANCELLED", "CANCEL_FAILED")
             and result.get("completed", False)
             and not self.isInterruptionRequested()
         )
 
-        # Stop VBUS monitoring before continuing.
+        # Stop VBUS monitoring before accessing the Acroname for USB2.
         self.performance_done.emit(run_usb2)
         self.vbus_stopped.wait()
 
-        # Run USB2 fallback when the previous stage completed successfully.
+        # Run USB2 fallback.
         if run_usb2 and not self.isInterruptionRequested():
-            service = Usb2FallbackTestService(
+            usb2_service = Usb2FallbackTestService(
                 emit_status=self.status.emit,
                 interruption_requested=self.isInterruptionRequested,
             )
 
-            usb2_result = service.run()
+            usb2_result = usb2_service.run()
             result["usb2_test"] = usb2_result
 
             if usb2_result["result"] != "PASS":
@@ -832,16 +888,30 @@ class UsbQualificationWorker(QThread):
 
         self.qualification_done.emit(result)
 
+
+    # --------------------------------------------------------
+    # VBUS SYNCHRONIZATION
+    # --------------------------------------------------------
+
     def notify_vbus_stopped(self):
         """Allow qualification to continue after VBUS monitoring stops."""
+
         self.vbus_stopped.set()
+
+
+    # --------------------------------------------------------
+    # QUALIFICATION CONTROL
+    # --------------------------------------------------------
 
     def abort(self, reason="Test interrupted"):
         """Abort the running qualification."""
+
         self.abort_reason = reason
         self.requestInterruption()
 
+
     def cancel(self):
         """Request operator cancellation."""
+
         self.cancel_requested = True
         self.requestInterruption()
