@@ -15,7 +15,6 @@ from model import (
     create_result_paths,
     build_device_info_text,
     unmount_device,
-    get_device_size_bytes,
     create_aligned_buffer,
     open_test_device,
     set_result_error,
@@ -138,8 +137,7 @@ class UsbPerformanceTestService:
         # Initialize the result structure and output paths.
         result = create_test_result(devnode)
         self.current_result = result
-        result["model"] = info["Model"]
-        result["serial"] = info["Serial"]
+        result["device_info"] = info.copy()
         result.update(create_result_paths(info["Serial"]))
 
         self.emit_device_info(build_device_info_text(info))
@@ -149,12 +147,10 @@ class UsbPerformanceTestService:
         unmount_device(devnode)
 
         # Verify that the device capacity is sufficient for the test.
-        try:
-            device_size = get_device_size_bytes(devnode)
-        except Exception as e:
-            raise RuntimeError(
-                f"Device unavailable : {e}"
-            ) from e
+        device_size = info["Size_Bytes"]
+
+        if device_size is None:
+            raise RuntimeError("Device capacity unavailable")
 
         if device_size < FILE_SIZE * 1.1:
             raise RuntimeError("The device's storage is too small for this test")
@@ -167,7 +163,7 @@ class UsbPerformanceTestService:
         reference_hash = hashlib.sha256(reference_bytes).digest()
 
         # Test counters and statistics.
-        errors = 0
+        integrity_errors = 0
         total_written = total_read = 0
         write_io_time = read_io_time = 0.0
         cycle_write_measurements = []
@@ -308,7 +304,7 @@ class UsbPerformanceTestService:
 
                     total_read += read_bytes
                     read_io_time += read_time
-                    errors += read_errors
+                    integrity_errors += read_errors
 
                 except Exception as exc:
                     io_failed = True
@@ -333,7 +329,7 @@ class UsbPerformanceTestService:
                 read_io_time=read_io_time,
                 cycle_write_measurements=cycle_write_measurements,
                 cycle_read_measurements=cycle_read_measurements,
-                integrity_errors=errors,
+                integrity_errors=integrity_errors,
                 interrupted=self.interruption_requested(),
                 io_failed=io_failed,
             )

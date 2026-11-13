@@ -269,21 +269,6 @@ class AppController(QObject):
                 self.new_device_ready = False
 
 
-    def _get_device_label(self, info):
-        """Build a display label from the device manufacturer and model."""
-
-        # Retrieve and normalize the device identification fields.
-        manufacturer = str(info.get("Manufacturer") or "N/A").strip()
-        model = str(info.get("Model") or "N/A").strip()
-
-        # Build the label using only available information.
-        label = " - ".join(
-            x for x in (manufacturer, model) if x and x != "N/A"
-        )
-
-        return label or "Unknown USB device"
-
-
     def _set_waiting_insert(self):
         """Return to the initial waiting state."""
 
@@ -313,7 +298,7 @@ class AppController(QObject):
 
         # Update the View with the validated DUT information.
         self.view.show_ready(
-            device_label=self._get_device_label(info),
+            device_label=info["DeviceLabel"],
             device_info_text=build_device_info_text(info),
         )
 
@@ -515,10 +500,7 @@ class AppController(QObject):
         result["test_link"] = self._get_test_link_info()
 
         # Build the final report content and graph.
-        result["report"] = build_report(
-            result.get("device_info", {}),
-            result,
-        )
+        result["report"] = build_report(result)
 
         self.view.prepare_final_graph(result)
 
@@ -545,8 +527,8 @@ class AppController(QObject):
                 figure=self.view.get_report_figure(),
                 of_number=self.test_config["of"],
                 sap=self.test_config["sap"],
-                device=result.get("model", "N/A"),
-                serial=result.get("serial", "N/A"),
+                device=result.get("device_info", {}).get("Model", "N/A"),
+                serial=result.get("device_info", {}).get("Serial", "N/A"),
                 file_size=f"{TEST_FILE_SIZE_MB} MB",
                 block_size=f"{BLOCK_SIZE_MB} MB",
                 test_duration=(

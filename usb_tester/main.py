@@ -5,14 +5,18 @@ Ensures administrator privileges, initializes the Qt application
 and starts the graphical interface.
 """
 
-import sys
+# Standard library
 import os
+import sys
 from pathlib import Path
+
+# Third-party libraries
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QDialog
 
-from view import MainWindow, TestSetupDialog
+# Application modules
 from controller import AppController
+from view import MainWindow, TestSetupDialog
 
 # ============================================================
 # 1. PRIVILEGE MANAGEMENT
