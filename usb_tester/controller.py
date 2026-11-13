@@ -21,7 +21,7 @@ from config import (
     TEMPLATE_PATH,
     TEST_CYCLES,
     TEST_DURATION,
-    TEST_DURATION_MODE,
+    TEST_LIMIT_MODE,
     TEST_FILE_SIZE_MB,
     VBUS_SAMPLE_INTERVAL_S,
 )
@@ -402,7 +402,7 @@ class AppController(QObject):
 
         if not success:
             self.vbus_error = message
-            self.view.show_vbus_error(message)
+            self.view.set_vbus_error(message)
 
         self.qualification_worker.start()
 
@@ -411,6 +411,9 @@ class AppController(QObject):
         """Update the current test phase."""
 
         self.current_phase = phase
+
+        if phase == TestPhase.IDLE:
+            self.view.set_progress(5)
 
 
     def _on_vbus_sample(self, sample):
@@ -421,14 +424,14 @@ class AppController(QObject):
 
         # Store and display the measurement.
         self.vbus_samples.append(sample)
-        self.view.show_vbus_sample(sample.phase, sample)
+        self.view.set_vbus_sample(sample.phase, sample)
 
 
     def _on_vbus_error(self, message):
         """Record a VBUS monitoring failure."""
 
         self.vbus_error = message
-        self.view.show_vbus_error(message)
+        self.view.set_vbus_error(message)
 
 
     def _on_performance_done(self, run_usb2):
@@ -436,8 +439,7 @@ class AppController(QObject):
 
         if run_usb2:
             self.state = AppState.USB2_TESTING
-            self.view.set_progress(97)
-            self.view.set_cancel_enabled(False)
+            self.view.enable_cancel(False)
 
         if self.vbus_worker is not None and self.vbus_worker.isRunning():
             self.vbus_worker.stop()
@@ -502,10 +504,9 @@ class AppController(QObject):
         # Build the final report content and graph.
         result["report"] = build_report(result)
 
-        self.view.prepare_final_graph(result)
+        self.view.update_final_graph(result)
 
         # Defer report generation so the progress update is displayed first.
-        self.view.set_progress(99)
         self.view.set_step_status("Generating report...")
         QTimer.singleShot(100, lambda: self._save_report(result))
 
@@ -533,7 +534,7 @@ class AppController(QObject):
                 block_size=f"{BLOCK_SIZE_MB} MB",
                 test_duration=(
                     f"{TEST_CYCLES} cycles"
-                    if TEST_DURATION_MODE == "cycles"
+                    if TEST_LIMIT_MODE == "cycles"
                     else f"{TEST_DURATION:g} s"
                 ),
                 final_fs=REFORMAT_FS.upper(),
@@ -833,7 +834,7 @@ class UsbQualificationWorker(QThread):
             status_callback=self.status.emit,
             device_info_callback=self.info_ready.emit,
             sample_callback=self.sample.emit,
-            progress_callback=self.progress.emit,
+            performance_progress_callback=self._on_performance_progress,
             phase_callback=self.phase_changed.emit,
             is_interrupted=self.isInterruptionRequested,
             is_cancelled=lambda: self.cancel_requested,
@@ -866,9 +867,14 @@ class UsbQualificationWorker(QThread):
             if usb2_result["result"] != "PASS":
                 result["result"] = "FAIL"
 
-            self.progress.emit(98)
-
         self.qualification_done.emit(result)
+
+
+    def _on_performance_progress(self, progress):
+        """Convert normalized test progress to GUI progress."""
+
+        percent = min(95, 5 + int(progress * 90))
+        self.progress.emit(percent)
 
 
     # --------------------------------------------------------

@@ -219,9 +219,6 @@ def wait_for_test_device(
         if len(candidates) == 1:
             devnode = candidates[0]
 
-            if expected_speed_mbps is None:
-                return devnode, get_usb_speed_mbps(devnode)
-
             try:
                 last_speed = get_usb_speed_mbps(devnode)
 
@@ -229,7 +226,10 @@ def wait_for_test_device(
                 time.sleep(poll_interval_s)
                 continue
 
-            if abs(last_speed - expected_speed_mbps) < 1.0:
+            if (
+                expected_speed_mbps is None
+                or abs(last_speed - expected_speed_mbps) < 1.0
+            ):
                 return devnode, last_speed
 
         time.sleep(poll_interval_s)
@@ -793,7 +793,6 @@ def create_test_result(devnode):
         "usb2_test": {
             "result": "NOT PERFORMED",
             "speed_mbps": None,
-            "devnode": "",
             "error": "",
         },
 

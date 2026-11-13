@@ -18,7 +18,7 @@ from config import (
     RESULTS_DIR,
     TEST_CYCLES,
     TEST_DURATION,
-    TEST_DURATION_MODE,
+    TEST_LIMIT_MODE,
     USB2_DISCONNECT_TIMEOUT_S,
     USB2_ENUM_TIMEOUT_S,
     USB2_POLL_INTERVAL_S,
@@ -66,7 +66,7 @@ class UsbPerformanceTestService:
         status_callback,
         device_info_callback,
         sample_callback,
-        progress_callback,
+        performance_progress_callback,
         phase_callback,
         is_interrupted,
         is_cancelled,
@@ -80,7 +80,7 @@ class UsbPerformanceTestService:
         self.status_callback = status_callback
         self.device_info_callback = device_info_callback
         self.sample_callback = sample_callback
-        self.progress_callback = progress_callback
+        self.performance_progress_callback = performance_progress_callback
         self.phase_callback = phase_callback
 
         self.is_interrupted = is_interrupted
@@ -174,7 +174,6 @@ class UsbPerformanceTestService:
 
         cycle = 0
         self._cycle = 0
-        self._last_pct = -1
         io_failed = False
 
         # TEST RESOURCE INITIALIZATION
@@ -218,12 +217,11 @@ class UsbPerformanceTestService:
 
             idle_step_duration = VBUS_IDLE_DURATION_S / 5
 
-            for progress in range(1, 6):
+            for _ in range(5):
                 if self.is_interrupted():
                     break
 
                 time.sleep(idle_step_duration)
-                self.progress_callback(progress)
 
             self.phase_callback(TestPhase.OTHER)
 
@@ -246,7 +244,7 @@ class UsbPerformanceTestService:
 
                 label_cycle = (
                     f"{cycle}/{TEST_CYCLES}"
-                    if TEST_DURATION_MODE == "cycles"
+                    if TEST_LIMIT_MODE == "cycles"
                     else str(cycle)
                 )
 
@@ -284,7 +282,7 @@ class UsbPerformanceTestService:
                     break
 
                 # Do not start reading if duration mode already reached its limit.
-                if TEST_DURATION_MODE == "duration" and self._is_limit_reached():
+                if TEST_LIMIT_MODE == "duration" and self._is_limit_reached():
                     break
 
                 # READ AND INTEGRITY VERIFICATION
@@ -418,10 +416,10 @@ class UsbPerformanceTestService:
             ])
 
             self.sample_callback("WRITE", elapsed, mbps)
-            self._update_progress("write", block_number)
+            self._report_performance_progress("write", block_number)
 
             # Stop when the configured duration has been reached.
-            if TEST_DURATION_MODE == "duration" and elapsed >= TEST_DURATION:
+            if TEST_LIMIT_MODE == "duration" and elapsed >= TEST_DURATION:
                 break
 
         # Flush writes outside performance timing.
@@ -495,10 +493,10 @@ class UsbPerformanceTestService:
             ])
 
             self.sample_callback("READ", elapsed, mbps)
-            self._update_progress("read", block_number)
+            self._report_performance_progress("read", block_number)
 
             # Stop when the configured duration has been reached.
-            if TEST_DURATION_MODE == "duration" and elapsed >= TEST_DURATION:
+            if TEST_LIMIT_MODE == "duration" and elapsed >= TEST_DURATION:
                 break
 
         return bytes_done, io_time, integrity_errors
@@ -519,7 +517,6 @@ class UsbPerformanceTestService:
             result["reformat"] = "NOT PERFORMED (test interrupted)"
             return
 
-        self.progress_callback(96)
         self.status_callback(f"Reformatting to {REFORMAT_FS.upper()}...")
 
         try:
@@ -599,16 +596,16 @@ class UsbPerformanceTestService:
     def _is_limit_reached(self):
         """Return whether the configured test limit has been reached."""
 
-        if TEST_DURATION_MODE == "cycles":
+        if TEST_LIMIT_MODE == "cycles":
             return self._cycle >= TEST_CYCLES
 
         return self._get_elapsed() >= TEST_DURATION
 
 
-    def _update_progress(self, phase, block_number):
-        """Update GUI progress during performance testing."""
+    def _report_performance_progress(self, phase, block_number):
+        """Report normalized performance-test progress."""
 
-        if TEST_DURATION_MODE == "cycles":
+        if TEST_LIMIT_MODE == "cycles":
             block_progress = (block_number + 1) / NUMBER_BLOCKS
 
             if phase == "write":
@@ -623,11 +620,9 @@ class UsbPerformanceTestService:
         else:
             progress = self._get_elapsed() / TEST_DURATION
 
-        progress_percent = min(95, 5 + int(progress * 90))
-
-        if progress_percent != self._last_pct:
-            self._last_pct = progress_percent
-            self.progress_callback(progress_percent)
+        self.performance_progress_callback(
+            min(1.0, max(0.0, progress))
+        )
 
 
 # ============================================================

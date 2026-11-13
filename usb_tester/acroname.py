@@ -1,17 +1,29 @@
 """BrainStem adapter for the Acroname USBExt3c."""
 
+# Third-party libraries
 import brainstem
 
+# Application configuration
 from config import ACRONAME_PORT
 
 
 class USBExt3cAdapter:
-    """Provide synchronous access to one USBExt3c."""
+    """Provide synchronous control and VBUS measurement for one USBExt3c."""
+
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
 
     def __init__(self):
+        """Initialize the USBExt3c adapter."""
+
         self._stem = brainstem.stem.USBExt3c()
         self._connected = False
 
+
+    # --------------------------------------------------------
+    # CONNECTION MANAGEMENT
+    # --------------------------------------------------------
 
     def connect(self):
         """Connect to the first USBExt3c found over USB."""
@@ -27,46 +39,86 @@ class USBExt3cAdapter:
 
         self._connected = True
 
+
+    def disconnect(self):
+        """Disconnect from the USBExt3c."""
+
+        if self._connected:
+            self._stem.disconnect()
+            self._connected = False
+
+
+    # --------------------------------------------------------
+    # DUT PORT CONTROL
+    # --------------------------------------------------------
+
     def restore_normal_port(self):
-        """Force the DUT port back to normal USB operation."""
+        """Restore normal USB operation on the DUT port."""
 
         self._require_connection()
 
         error = self._stem.usb.setPortEnable(
             ACRONAME_PORT
         )
-        self._check_error(
-            error,
-            "Acroname port enable",
-        )
+        self._check_error(error, "Acroname port enable")
 
         error = self._stem.usb.setHiSpeedDataEnable(
             ACRONAME_PORT
         )
-        self._check_error(
-            error,
-            "USB High-Speed enable",
-        )
+        self._check_error(error, "USB High-Speed enable")
 
         error = self._stem.usb.setSuperSpeedDataEnable(
             ACRONAME_PORT
         )
-        self._check_error(
-            error,
-            "USB SuperSpeed enable",
-        )
+        self._check_error(error, "USB SuperSpeed enable")
 
         error = self._stem.usb.setPowerEnable(
             ACRONAME_PORT
         )
-        self._check_error(
-            error,
-            "VBUS enable",
+        self._check_error(error, "VBUS enable")
+
+
+    def power_off_dut(self):
+        """Disable DUT power while preserving the port configuration."""
+
+        self._require_connection()
+
+        error = self._stem.usb.setPowerDisable(
+            ACRONAME_PORT
         )
 
+        self._check_error(error, "DUT power disable")
+
+
+    def enable_usb2_only(self):
+        """Enable USB 2.0 High-Speed operation and disable SuperSpeed."""
+
+        self._require_connection()
+
+        # Configure data paths while the DUT is powered off.
+        error = self._stem.usb.setHiSpeedDataEnable(
+            ACRONAME_PORT
+        )
+        self._check_error(error, "USB High-Speed enable")
+
+        error = self._stem.usb.setSuperSpeedDataDisable(
+            ACRONAME_PORT
+        )
+        self._check_error(error, "USB SuperSpeed disable")
+
+        # Power the DUT after configuring the data paths.
+        error = self._stem.usb.setPowerEnable(
+            ACRONAME_PORT
+        )
+        self._check_error(error, "DUT power enable")
+
+
+    # --------------------------------------------------------
+    # VBUS MEASUREMENT
+    # --------------------------------------------------------
 
     def read_vbus(self):
-        """Return port voltage in volts and current in milliamperes."""
+        """Return DUT voltage in volts and current in milliamperes."""
 
         self._require_connection()
 
@@ -89,13 +141,9 @@ class USBExt3cAdapter:
         )
 
 
-    def disconnect(self):
-        """Disconnect safely."""
-
-        if self._connected:
-            self._stem.disconnect()
-            self._connected = False
-
+    # --------------------------------------------------------
+    # INTERNAL HELPERS
+    # --------------------------------------------------------
 
     def _require_connection(self):
         """Ensure that the USBExt3c is connected."""
@@ -111,50 +159,3 @@ class USBExt3cAdapter:
             raise RuntimeError(
                 f"{operation} failed: {error}"
             )
-
-
-    def power_off_dut(self):
-        """Power off the DUT while keeping the USB data/CC configuration."""
-
-        self._require_connection()
-
-        error = self._stem.usb.setPowerDisable(
-            ACRONAME_PORT
-        )
-
-        self._check_error(
-            error,
-            "DUT power disable",
-        )
-
-
-    def enable_usb2_only(self):
-        """Power the DUT with USB 2 HS enabled and USB 3 SS disabled."""
-
-        self._require_connection()
-
-        # Configure data lines while DUT is powered off.
-        error = self._stem.usb.setHiSpeedDataEnable(
-            ACRONAME_PORT
-        )
-        self._check_error(
-            error,
-            "USB 2 High-Speed enable",
-        )
-
-        error = self._stem.usb.setSuperSpeedDataDisable(
-            ACRONAME_PORT
-        )
-        self._check_error(
-            error,
-            "USB SuperSpeed disable",
-        )
-
-        # Power DUT only after the data path is configured.
-        error = self._stem.usb.setPowerEnable(
-            ACRONAME_PORT
-        )
-        self._check_error(
-            error,
-            "DUT power enable",
-        )

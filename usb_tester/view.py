@@ -1,38 +1,34 @@
-"""USB tester GUI: display, test monitoring and reporting."""
+"""USB tester graphical interface and test result visualization."""
 
-import numpy as np
-
+# Third-party libraries
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
-
 from PyQt5.QtWidgets import (
-    QMainWindow,
-    QWidget,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QLabel,
-    QPushButton,
-    QProgressBar,
+    QLineEdit,
+    QMainWindow,
     QPlainTextEdit,
-    QVBoxLayout,
+    QProgressBar,
+    QPushButton,
     QSplitter,
     QStackedWidget,
-    QDialog,
-    QFormLayout,
-    QLineEdit,
-    QComboBox,
-    QDialogButtonBox,
+    QVBoxLayout,
+    QWidget,
 )
 
-
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qt5agg import (
-    FigureCanvasQTAgg as FigureCanvas,
-)
 
+# Application configuration
 from config import (
-    TEST_FILE_SIZE_MB,
     BLOCK_SIZE_MB,
-    MIN_WRITE_MBPS,
     MIN_READ_MBPS,
+    MIN_WRITE_MBPS,
+    TEST_FILE_SIZE_MB,
     TEST_LINK_REFS,
 )
 
@@ -48,25 +44,25 @@ COLORS = {
     "fail": "#b02a37",
 }
 
-# -- Test window title
+# Window.
 TXT_WINDOW_TITLE = "EOL test flash drive"
 
-# -- Banner text
+# Banner.
 TXT_INSERT = "Insert flash drive"
 TXT_READY = "Flash drive detected"
 TXT_TESTING = "In progress..."
 TXT_PASS = "PASS"
 TXT_FAIL = "FAIL"
 
-# -- Status text
+# Status.
 TXT_DO_NOT_UNPLUG = "Do not unplug"
 
-# -- Button text
+# Buttons.
 TXT_BUTTON_START = "START"
 TXT_BUTTON_NEW_TEST = "NEW TEST"
 TXT_BUTTON_CANCEL_TEST = "CANCEL TEST"
 
-# -- Text sizes
+# Font sizes.
 SIZE_TXT_BANNER = 44
 SIZE_TXT_STATUS = 11
 SIZE_TXT_DEV_STATUS = 10
@@ -75,19 +71,25 @@ SIZE_TXT_INFO = 9
 
 
 # ============================================================
-# 2. TEST CONFIGURATION
+# 2. SESSION SETUP DIALOG
 # ============================================================
 
 class TestSetupDialog(QDialog):
     """Configure OF, SAP and test-link selection at startup."""
 
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
+
     def __init__(self):
+        """Initialize the test setup window."""
+
         super().__init__()
 
         self.setWindowTitle(TXT_WINDOW_TITLE)
         self.setFixedWidth(400)
 
-        # --- Widgets ---
+        # Widgets
 
         self.of_input = QLineEdit()
         self.of_input.setPlaceholderText("Enter OF number")
@@ -97,7 +99,7 @@ class TestSetupDialog(QDialog):
 
         self.test_link_label = QLabel()
 
-        # --- Layout ---
+        # Layout
 
         layout = QVBoxLayout(self)
 
@@ -115,7 +117,7 @@ class TestSetupDialog(QDialog):
 
         layout.addLayout(form)
 
-        # --- Buttons ---
+        # Buttons
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
@@ -128,7 +130,7 @@ class TestSetupDialog(QDialog):
 
         layout.addWidget(self.buttons)
 
-        # --- Signals ---
+        # Signals
 
         self.sap_combo.currentTextChanged.connect(
             self._update_test_link_label
@@ -138,10 +140,15 @@ class TestSetupDialog(QDialog):
             self._update_start_button_state
         )
 
-        # --- Initialisation ---
+        # Initialisation
 
         self._update_test_link_label()
         self._update_start_button_state()
+
+
+    # --------------------------------------------------------
+    # DIALOG UPDATES
+    # --------------------------------------------------------
 
     def _update_test_link_label(self):
         """Display the test link associated with the selected SAP."""
@@ -152,6 +159,7 @@ class TestSetupDialog(QDialog):
             TEST_LINK_REFS.get(sap, "N/A")
         )
 
+
     def _update_start_button_state(self):
         """Enable session start only when an OF number is provided."""
 
@@ -160,6 +168,11 @@ class TestSetupDialog(QDialog):
         self.buttons.button(
             QDialogButtonBox.Ok
         ).setEnabled(valid)
+
+
+    # --------------------------------------------------------
+    # CONFIGURATION OUTPUT
+    # --------------------------------------------------------
 
     def get_configuration(self):
         """Return the configuration selected by the operator."""
@@ -174,7 +187,7 @@ class TestSetupDialog(QDialog):
 
 
 # ============================================================
-# 2. MAIN WINDOW
+# 3. MAIN WINDOW
 # ============================================================
 
 class MainWindow(QMainWindow):
@@ -185,9 +198,13 @@ class MainWindow(QMainWindow):
     new_test_requested = pyqtSignal()
     close_requested = pyqtSignal()
 
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
 
     def __init__(self):
         """Initialize the main test window."""
+
         super().__init__()
 
         self.setWindowTitle(TXT_WINDOW_TITLE)
@@ -202,7 +219,7 @@ class MainWindow(QMainWindow):
 
         # Initialize the interface.
         self.graph_dirty = False
-        self._reset_graph_series()
+        self._reset_graph_data()
         self._build_ui()
         self._set_banner(TXT_INSERT, COLORS["wait"])
         self._set_user_status("")
@@ -210,9 +227,13 @@ class MainWindow(QMainWindow):
 
         # Periodic graph refresh.
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._refresh_graph)
+        self.timer.timeout.connect(self._update_graph)
         self.timer.start(300)
 
+
+    # --------------------------------------------------------
+    # UI CONSTRUCTION
+    # --------------------------------------------------------
 
     def _build_ui(self):
         """Build and arrange the interface widgets."""
@@ -221,78 +242,73 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
 
-        # --- Main banner ---
+        # Main banner
         self.banner = QLabel()
         self.banner.setAlignment(Qt.AlignCenter)
         self.banner.setMinimumHeight(SIZE_TXT_BANNER + 20)
         root.addWidget(self.banner)
 
-        # --- User status ---
+        # User status
         self.status_label = QLabel("")
         self.status_label.setFont(QFont("Sans", SIZE_TXT_STATUS))
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
-        # --- START button ---
+        # Action button
         self.start_button = QPushButton(TXT_BUTTON_START)
         self.start_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
         self.start_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
         self.start_button.setEnabled(False)
-        self.start_button.clicked.connect(self.on_start_clicked)
+        self.start_button.clicked.connect(self._on_start_clicked)
 
-        # --- NEW TEST button ---
         self.restart_button = QPushButton(TXT_BUTTON_NEW_TEST)
         self.restart_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
         self.restart_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
-        self.restart_button.clicked.connect(self.on_restart_clicked)
+        self.restart_button.clicked.connect(self._on_restart_clicked)
 
-        # --- CANCEL TEST button ---
         self.cancel_button = QPushButton(TXT_BUTTON_CANCEL_TEST)
         self.cancel_button.setFont(QFont("Sans", SIZE_TXT_BUTTON, QFont.Bold))
         self.cancel_button.setMinimumHeight(SIZE_TXT_BUTTON + 20)
-        self.cancel_button.clicked.connect(self.on_cancel_clicked)
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
 
-        # Only one action button is visible at a time.
         self.button_stack = QStackedWidget()
         self.button_stack.addWidget(self.start_button)
         self.button_stack.addWidget(self.restart_button)
         self.button_stack.addWidget(self.cancel_button)
 
-        # START is displayed by default.
         self.button_stack.setCurrentWidget(self.start_button)
 
         root.addWidget(self.button_stack)
 
-        # --- Progress bar ---
+        # Progress and test status.
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         root.addWidget(self.progress)
 
-        # --- Detailed test status ---
         self.dev_status_label = QLabel("")
         self.dev_status_label.setFont(QFont("Sans", SIZE_TXT_DEV_STATUS))
         self.dev_status_label.setAlignment(Qt.AlignCenter)
         root.addWidget(self.dev_status_label)
 
-        # Live VBUS measurements
+        # VBUS measurements.
         self.vbus_label = QLabel("VBUS: N/A")
         self.vbus_label.setAlignment(Qt.AlignCenter)
         root.addWidget(self.vbus_label)
 
-        # --- Device information ---
+        # Device information
         self.info_text = QPlainTextEdit()
         self.info_text.setReadOnly(True)
         self.info_text.setFont(QFont("Monospace", SIZE_TXT_INFO))
         self.info_text.setLineWrapMode(QPlainTextEdit.NoWrap)
 
-        # --- Performance graph ---
+        # Performance graph
         self.figure = Figure(figsize=(8, 5))
         self.canvas = FigureCanvas(self.figure)
         self.ax = self.figure.add_subplot(111)
-        self._init_graph_axes()
+        self._reset_graph_axes()
 
-        # --- Information and graph layout ---
+        # Main content layout.
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.info_text)
         splitter.addWidget(self.canvas)
@@ -300,8 +316,13 @@ class MainWindow(QMainWindow):
         root.addWidget(splitter, 1)
 
 
+    # --------------------------------------------------------
+    # INTERNAL DISPLAY HELPERS
+    # --------------------------------------------------------
+
     def _set_banner(self, title, color):
-        """Update the main banner text and color."""
+        """Set the main banner text and color."""
+        
         self.banner.setText(
             f"<div style='font-size:{SIZE_TXT_BANNER}px;"
             f"font-weight:bold'>{title}</div>"
@@ -312,41 +333,58 @@ class MainWindow(QMainWindow):
 
 
     def _set_user_status(self, text):
-        """Update the message displayed below the banner."""
+        """Set the message displayed below the banner."""
+        
         self.status_label.setText(text)
 
 
-    def set_step_status(self, text):
-        """Display the current test step."""
-
-        self.dev_status_label.setText(
-            f"Step : {text}"
-        )
-
-
     def _reset_view(self):
-        """Clear previous information and reset graph and progress."""
+        """Reset displayed test information."""
 
-       # Previous test information.
+        # Information.
         self.set_result_text("")
         self.set_step_status("")
+        self.vbus_label.setText("VBUS: N/A")
 
         # Performance graph.
-        self._reset_graph_series()
+        self._reset_graph_data()
         self.graph_dirty = False
-        self._init_graph_axes()
+        self._reset_graph_axes()
 
-        # Progress bar.
+        # Progress.
         self.progress.setValue(0)
 
 
-    def _reset_graph_series(self):
-        """Reset graph measurement series."""
-        self.wt, self.ws, self.rt, self.rs = [], [], [], []
+    def _update_information_panel(self):
+        """Render the current information panel."""
+
+        if self.show_test_link_header:
+            text = (
+                f"{self.test_link_header}\n\n"
+                f"{self.current_info}"
+            )
+        else:
+            text = self.current_info
+
+        self.info_text.setPlainText(text)
 
 
-    def _init_graph_axes(self):
-        """Configure graph axes, curves and qualification thresholds."""
+    # --------------------------------------------------------
+    # GRAPH MANAGEMENT
+    # --------------------------------------------------------
+
+    def _reset_graph_data(self):
+        """Clear performance graph data."""
+
+        self.write_times = []
+        self.write_speeds = []
+        self.read_times = []
+        self.read_speeds = []
+
+
+    def _reset_graph_axes(self):
+        """Reset graph axes, curves and qualification thresholds."""
+
         self.ax.clear()
         self.ax.set_xlabel("Test Time [min]")
         self.ax.set_ylabel("Speed [MB/s]")
@@ -382,62 +420,149 @@ class MainWindow(QMainWindow):
         self.canvas.draw_idle()
 
 
-    def _refresh_graph(self):
-        """Refresh the graph when new measurements are available."""
+    def _update_graph(self):
+        """Update the graph with current measurements."""
+
         if not self.graph_dirty:
             return
+
         self.graph_dirty = False
-        self.line_w.set_data(np.asarray(self.wt) / 60, self.ws)
-        self.line_r.set_data(np.asarray(self.rt) / 60, self.rs)
+
+        self.line_w.set_data(
+            [time / 60 for time in self.write_times],
+            self.write_speeds,
+        )
+
+        self.line_r.set_data(
+            [time / 60 for time in self.read_times],
+            self.read_speeds,
+        )
+
         self.ax.relim()
         self.ax.autoscale_view()
         self.canvas.draw_idle()
 
 
-    def on_start_clicked(self):
-        """Notify the Controller that START was requested."""
-        self.start_requested.emit()
+    def add_speed_sample(self, operation, elapsed_s, speed_mbps):
+        """Add one performance sample to the graph."""
+
+        if operation == "SEP":
+            nan = float("nan")
+            self.write_times.append(nan)
+            self.write_speeds.append(nan)
+            self.read_times.append(nan)
+            self.read_speeds.append(nan)
+
+        elif operation == "WRITE":
+            self.write_times.append(elapsed_s)
+            self.write_speeds.append(speed_mbps)
+
+        elif operation == "READ":
+            self.read_times.append(elapsed_s)
+            self.read_speeds.append(speed_mbps)
+
+        else:
+            return
+
+        self.graph_dirty = True
 
 
-    def on_cancel_clicked(self):
-        """Notify the Controller that cancellation was requested."""
-        self.cancel_requested.emit()
+    def update_final_graph(self, result):
+        """Add final test results to the graph."""
 
-    def set_cancel_enabled(self, enabled):
-        """Enable or disable test cancellation."""
-        self.cancel_button.setEnabled(enabled)
+        self._update_graph()
 
-    def on_restart_clicked(self):
-        """Notify the Controller that a new test was requested."""
-        self.new_test_requested.emit()
+        for key, color, label in (
+            ("avg_write", "darkblue", "Average Write"),
+            ("avg_read", "darkorange", "Average Read"),
+        ):
+            value = result.get(key)
+
+            if value is not None and value > 0:
+                self.ax.axhline(
+                    value,
+                    linestyle="--",
+                    alpha=0.5,
+                    color=color,
+                    label=f"{label}: {value:.1f} MB/s",
+                )
+
+        self.ax.legend(loc="lower left")
+        self.canvas.draw()
+
 
     def get_report_figure(self):
         """Return the graph used in the final report."""
 
         return self.figure
 
-    def allow_close(self):
-        """Permit the final window close."""
+    
+    # --------------------------------------------------------
+    # LIVE TEST DISPLAY
+    # --------------------------------------------------------
 
-        self._close_allowed = True
-        self.close()
+    def set_step_status(self, text):
+        """Set the current test step."""
 
-    def closeEvent(self, event):
-        """Delegate shutdown to the controller."""
-
-        if self._close_allowed:
-            self.timer.stop()
-            event.accept()
-            return
-
-        event.ignore()
-        self.close_requested.emit()
+        self.dev_status_label.setText(
+            f"Step: {text}" if text else ""
+        )
 
 
-    def show_vbus_error(self, message):
-        """Display a VBUS monitoring error."""
+    def set_progress(self, value):
+        """Set the progress bar value."""
+
+        self.progress.setValue(value)
+
+
+    def set_vbus_sample(self, phase, sample):
+        """Set the current VBUS measurement."""
+
+        self.vbus_label.setText(
+            f"VBUS [{phase.value}]: "
+            f"{sample.voltage_v:.3f} V | "
+            f"{sample.current_ma:.2f} mA"
+        )
+
+
+    def set_vbus_error(self, message):
+        """Set the VBUS monitoring error message."""
 
         self.vbus_label.setText(f"VBUS unavailable: {message}")
+
+
+    def set_test_link_info(self, reference, cycles, max_cycles):
+        """Set the test-link information header."""
+
+        self.test_link_header = (
+            "=== TEST-LINK ===\n"
+            f"Reference : {reference}\n"
+            f"Mating cycle : {cycles} / {max_cycles}"
+        )
+
+        self._update_information_panel()
+
+
+    def set_result_text(
+        self,
+        text,
+        show_test_link_header=True,
+    ):
+        """Set the currently displayed information text."""
+
+        self.current_info = text
+        self.show_test_link_header = show_test_link_header
+        self._update_information_panel()
+
+
+    def enable_cancel(self, enabled):
+        """Enable or disable test cancellation."""
+        self.cancel_button.setEnabled(enabled)
+
+
+    # --------------------------------------------------------
+    # APPLICATION STATES
+    # --------------------------------------------------------
 
 
     def show_waiting_insert(self):
@@ -499,104 +624,6 @@ class MainWindow(QMainWindow):
         )
 
 
-    def set_progress(self, value):
-        """Update the progress bar."""
-
-        self.progress.setValue(value)
-
-
-    def add_speed_sample(self, operation, elapsed_s, speed_mbps):
-        """Add one performance sample to the graph."""
-
-        if operation == "SEP":
-            nan = float("nan")
-            self.wt.append(nan)
-            self.ws.append(nan)
-            self.rt.append(nan)
-            self.rs.append(nan)
-
-        elif operation == "WRITE":
-            self.wt.append(elapsed_s)
-            self.ws.append(speed_mbps)
-
-        elif operation == "READ":
-            self.rt.append(elapsed_s)
-            self.rs.append(speed_mbps)
-
-        else:
-            return
-
-        self.graph_dirty = True
-
-
-    def show_vbus_sample(self, phase, sample):
-        """Display one live electrical measurement."""
-
-        self.vbus_label.setText(
-            f"VBUS [{phase.value}]: "
-            f"{sample.voltage_v:.3f} V | "
-            f"{sample.current_ma:.2f} mA"
-        )
-
-    def set_test_link_info(self, reference, cycles, max_cycles):
-        """Update the test-link presentation header."""
-
-        self.test_link_header = (
-            "=== TEST-LINK ===\n"
-            f"Reference : {reference}\n"
-            f"Mating cycle : {cycles} / {max_cycles}"
-        )
-
-        self._refresh_information_panel()
-
-    def set_result_text(
-        self,
-        text,
-        show_test_link_header=True,
-    ):
-        """Set the currently displayed information text."""
-
-        self.current_info = text
-        self.show_test_link_header = show_test_link_header
-        self._refresh_information_panel()
-
-    def _refresh_information_panel(self):
-        """Render the current information panel."""
-
-        if self.show_test_link_header:
-            text = (
-                f"{self.test_link_header}\n\n"
-                f"{self.current_info}"
-            )
-        else:
-            text = self.current_info
-
-        self.info_text.setPlainText(text)
-
-    def prepare_final_graph(self, result):
-        """Finalize the performance graph."""
-
-        self._refresh_graph()
-
-        for key, color, label in (
-            ("avg_write", "darkblue", "Average Write"),
-            ("avg_read", "darkorange", "Average Read"),
-        ):
-            value = result.get(key)
-
-            if value is not None and value > 0:
-                self.ax.axhline(
-                    value,
-                    linestyle="--",
-                    alpha=0.5,
-                    color=color,
-                    label=f"{label}: {value:.1f} MB/s",
-                )
-
-        self.ax.legend(loc="lower left")
-        self.canvas.draw()
-
-
     def show_final_result(self, result, report_saved):
         """Display the final test verdict and report."""
 
@@ -628,3 +655,46 @@ class MainWindow(QMainWindow):
         )
         self.set_step_status(message)
         self.button_stack.setCurrentWidget(self.restart_button)
+
+
+    # --------------------------------------------------------
+    # USER ACTIONS
+    # --------------------------------------------------------
+
+    def _on_start_clicked(self):
+        """Notify the Controller that START was requested."""
+
+        self.start_requested.emit()
+
+
+    def _on_cancel_clicked(self):
+        """Notify the Controller that cancellation was requested."""
+        self.cancel_requested.emit()
+
+
+    def _on_restart_clicked(self):
+        """Notify the Controller that a new test was requested."""
+        self.new_test_requested.emit()
+
+
+    # --------------------------------------------------------
+    # WINDOW CLOSING
+    # --------------------------------------------------------
+
+    def allow_close(self):
+        """Permit the final window close."""
+
+        self._close_allowed = True
+        self.close()
+
+
+    def closeEvent(self, event):
+        """Delegate shutdown to the controller."""
+
+        if self._close_allowed:
+            self.timer.stop()
+            event.accept()
+            return
+
+        event.ignore()
+        self.close_requested.emit()
