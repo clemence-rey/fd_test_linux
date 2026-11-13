@@ -830,14 +830,14 @@ class UsbQualificationWorker(QThread):
         performance_service = UsbPerformanceTestService(
             devnode=self.devnode,
             expected_diskseq=self.expected_diskseq,
-            emit_status=self.status.emit,
-            emit_device_info=self.info_ready.emit,
-            emit_sample=self.sample.emit,
-            emit_progress=self.progress.emit,
-            emit_phase=self.phase_changed.emit,
-            interruption_requested=self.isInterruptionRequested,
-            cancellation_requested=lambda: self.cancel_requested,
-            abort_reason=lambda: self.abort_reason,
+            status_callback=self.status.emit,
+            device_info_callback=self.info_ready.emit,
+            sample_callback=self.sample.emit,
+            progress_callback=self.progress.emit,
+            phase_callback=self.phase_changed.emit,
+            is_interrupted=self.isInterruptionRequested,
+            is_cancelled=lambda: self.cancel_requested,
+            get_abort_reason=lambda: self.abort_reason,
         )
 
         result = performance_service.run()
@@ -856,8 +856,8 @@ class UsbQualificationWorker(QThread):
         # Run USB2 fallback.
         if run_usb2 and not self.isInterruptionRequested():
             usb2_service = Usb2FallbackTestService(
-                emit_status=self.status.emit,
-                interruption_requested=self.isInterruptionRequested,
+                status_callback=self.status.emit,
+                is_interrupted=self.isInterruptionRequested,
             )
 
             usb2_result = usb2_service.run()

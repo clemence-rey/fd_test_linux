@@ -1,50 +1,51 @@
 """USB qualification test services."""
 
-from contextlib import ExitStack
+# Standard library
+import csv
 import hashlib
 import os
-import csv
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
-
-from model import (
-    assert_expected_test_device,
-    get_device_info,
-    create_test_result,
-    create_result_paths,
-    build_device_info_text,
-    unmount_device,
-    create_aligned_buffer,
-    open_test_device,
-    set_result_error,
-    evaluate_performance_test,
-    compute_mbps,
-    reformat_device,
-    wait_for_test_port_empty,
-    wait_for_test_device,
-)
-
+# Application configuration
 from config import (
-    RESULTS_DIR,
-    FILE_SIZE,
     BLOCK_SIZE,
-    VBUS_IDLE_DURATION_S,
-    TEST_DURATION_MODE,
+    FILE_SIZE,
     NUMBER_BLOCKS,
-    TEST_DURATION,
-    TEST_CYCLES,
     REFORMAT_FS,
     REFORMAT_LABEL,
-    USB2_ENUM_TIMEOUT_S,
+    RESULTS_DIR,
+    TEST_CYCLES,
+    TEST_DURATION,
+    TEST_DURATION_MODE,
     USB2_DISCONNECT_TIMEOUT_S,
-    USB2_RESTORE_TIMEOUT_S,
+    USB2_ENUM_TIMEOUT_S,
     USB2_POLL_INTERVAL_S,
+    USB2_RESTORE_TIMEOUT_S,
+    VBUS_IDLE_DURATION_S,
 )
 
+# Application modules
 from acroname import USBExt3cAdapter
-
-from model import TestPhase
+from model import (
+    TestPhase,
+    assert_expected_test_device,
+    build_device_info_text,
+    compute_mbps,
+    create_aligned_buffer,
+    create_result_paths,
+    create_test_result,
+    evaluate_performance_test,
+    get_device_info,
+    open_test_device,
+    reformat_device,
+    set_result_error,
+    format_error,
+    unmount_device,
+    wait_for_test_device,
+    wait_for_test_port_empty,
+)
 
 
 # ============================================================
@@ -54,55 +55,59 @@ from model import TestPhase
 class UsbPerformanceTestService:
     """Execute USB performance, integrity and reformatting tests."""
 
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
+
     def __init__(
         self,
         devnode,
         expected_diskseq,
-        emit_status,
-        emit_device_info,
-        emit_sample,
-        emit_progress,
-        emit_phase,
-        interruption_requested,
-        cancellation_requested,
-        abort_reason,
+        status_callback,
+        device_info_callback,
+        sample_callback,
+        progress_callback,
+        phase_callback,
+        is_interrupted,
+        is_cancelled,
+        get_abort_reason,
     ):
         """Initialize the test service and its callbacks."""
 
         self.devnode = devnode
         self.expected_diskseq = expected_diskseq
 
-        self.emit_status = emit_status
-        self.emit_device_info = emit_device_info
-        self.emit_sample = emit_sample
-        self.emit_progress = emit_progress
-        self.emit_phase = emit_phase
+        self.status_callback = status_callback
+        self.device_info_callback = device_info_callback
+        self.sample_callback = sample_callback
+        self.progress_callback = progress_callback
+        self.phase_callback = phase_callback
 
-        self.interruption_requested = interruption_requested
-        self.cancellation_requested = cancellation_requested
-        self.abort_reason = abort_reason
+        self.is_interrupted = is_interrupted
+        self.is_cancelled = is_cancelled
+        self.get_abort_reason = get_abort_reason
 
+
+    # --------------------------------------------------------
+    # TEST SEQUENCE
+    # --------------------------------------------------------
 
     def run(self):
-        """Execute the USB performance, integrity, and reformatting sequence."""
+        """Execute the USB performance, integrity and reformatting sequence."""
 
         self.current_result = create_test_result(self.devnode)
-        self.device_info = {}
 
         try:
             return self._execute_test_sequence()
 
         except Exception as exc:
-            result = self.current_result
+            set_result_error(self.current_result, exc, "USB test")
+            self.current_result["reformat"] = "NOT PERFORMED (test error)"
 
-            set_result_error(result, exc, "USB test")
-            result["reformat"] = "NOT PERFORMED (test error)"
-            result["device_info"] = self.device_info.copy()
-
-            return result
+            return self.current_result
 
         finally:
-            self.emit_phase(TestPhase.OTHER)
+            self.phase_callback(TestPhase.OTHER)
 
 
     def _execute_test_sequence(self):
@@ -120,7 +125,9 @@ class UsbPerformanceTestService:
         """
 
         devnode = self.devnode
-        self.emit_phase(TestPhase.OTHER)
+        result = self.current_result
+
+        self.phase_callback(TestPhase.OTHER)
 
         # DEVICE IDENTIFICATION AND PREPARATION
 
@@ -129,21 +136,17 @@ class UsbPerformanceTestService:
 
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Retrieve device information.
-        self.emit_status("Reading device information...")
-        info = get_device_info(devnode)
-        self.device_info = info.copy()
+        # Retrieve and store device information.
+        self.status_callback("Reading device information...")
 
-        # Initialize the result structure and output paths.
-        result = create_test_result(devnode)
-        self.current_result = result
+        info = get_device_info(devnode)
         result["device_info"] = info.copy()
         result.update(create_result_paths(info["Serial"]))
 
-        self.emit_device_info(build_device_info_text(info))
+        self.device_info_callback(build_device_info_text(info))
 
         # Unmount partitions before direct raw access.
-        self.emit_status("Unmounting / raw access to the device...")
+        self.status_callback("Unmounting / raw access to the device...")
         unmount_device(devnode)
 
         # Verify that the device capacity is sufficient for the test.
@@ -162,18 +165,19 @@ class UsbPerformanceTestService:
         reference_bytes = os.urandom(BLOCK_SIZE)
         reference_hash = hashlib.sha256(reference_bytes).digest()
 
-        # Test counters and statistics.
+        # Initialize test measurements.
         integrity_errors = 0
         total_written = total_read = 0
         write_io_time = read_io_time = 0.0
         cycle_write_measurements = []
         cycle_read_measurements = []
-        
-        cycle = 0
 
+        cycle = 0
         self._cycle = 0
         self._last_pct = -1
         io_failed = False
+
+        # TEST RESOURCE INITIALIZATION
 
         # Resources are automatically released when leaving this block.
         with ExitStack() as stack:
@@ -182,6 +186,7 @@ class UsbPerformanceTestService:
             write_buffer = stack.enter_context(
                 create_aligned_buffer(BLOCK_SIZE, fill=reference_bytes)
             )
+
             read_buffer = stack.enter_context(
                 create_aligned_buffer(BLOCK_SIZE)
             )
@@ -193,37 +198,43 @@ class UsbPerformanceTestService:
 
             writer = csv.writer(csv_handle)
             writer.writerow([
-                "Cycle", "Operation", "Block number", "Block size",
-                "Duration_s", "MB/s", "Integrity"
+                "Cycle",
+                "Operation",
+                "Block number",
+                "Block size",
+                "Duration_s",
+                "MB/s",
+                "Integrity",
             ])
 
             # Open the disk exclusively using O_DIRECT.
-            # The opened device identity is also verified.
             fd = open_test_device(devnode, self.expected_diskseq)
             stack.callback(os.close, fd)
 
-            self.emit_status("Measuring idle VBUS...")
-            self.emit_phase(TestPhase.IDLE)
+            # IDLE VBUS MEASUREMENT
+
+            self.status_callback("Measuring idle VBUS...")
+            self.phase_callback(TestPhase.IDLE)
 
             idle_step_duration = VBUS_IDLE_DURATION_S / 5
 
             for progress in range(1, 6):
-                if self.interruption_requested():
+                if self.is_interrupted():
                     break
 
                 time.sleep(idle_step_duration)
-                self.emit_progress(progress)
+                self.progress_callback(progress)
 
-            self.emit_phase(TestPhase.OTHER)
+            self.phase_callback(TestPhase.OTHER)
 
-            # Start performance-test timing after the idle phase.
+            # Start performance timing after the idle phase.
             self._global_start = time.perf_counter()
 
-            # WRITE AND READ CYCLE EXECUTION
+            # WRITE AND READ CYCLES
 
             while (
                 not self._is_limit_reached()
-                and not self.interruption_requested()
+                and not self.is_interrupted()
                 and not io_failed
             ):
                 cycle += 1
@@ -231,19 +242,18 @@ class UsbPerformanceTestService:
 
                 # Visually separate cycles on the graph.
                 if cycle > 1:
-                    self.emit_sample(
-                        "SEP", float("nan"), float("nan")
-                    )
+                    self.sample_callback("SEP", float("nan"), float("nan"))
 
-                if TEST_DURATION_MODE == "cycles":
-                    label_cycle = f"{cycle}/{TEST_CYCLES}"
-                else:
-                    label_cycle = str(cycle)
+                label_cycle = (
+                    f"{cycle}/{TEST_CYCLES}"
+                    if TEST_DURATION_MODE == "cycles"
+                    else str(cycle)
+                )
 
-                # 3.1 WRITE
+                # WRITE
 
-                self.emit_status(f"Cycle {label_cycle} - WRITE")
-                self.emit_phase(TestPhase.WRITE)
+                self.status_callback(f"Cycle {label_cycle} - WRITE")
+                self.phase_callback(TestPhase.WRITE)
 
                 try:
                     os.lseek(fd, 0, os.SEEK_SET)
@@ -256,8 +266,6 @@ class UsbPerformanceTestService:
                         write_buffer,
                         cycle,
                         writer,
-                        self._get_elapsed,
-                        self._emit_progress,
                         block_measurements,
                     )
 
@@ -269,21 +277,20 @@ class UsbPerformanceTestService:
                     set_result_error(result, exc, "Write")
 
                 finally:
-                    self.emit_phase(TestPhase.OTHER)
+                    self.phase_callback(TestPhase.OTHER)
 
                 # Do not continue after an error or interruption.
-                if io_failed or self.interruption_requested():
+                if io_failed or self.is_interrupted():
                     break
 
-                # In duration mode, do not start a read operation
-                # if the test duration was already reached after writing.
+                # Do not start reading if duration mode already reached its limit.
                 if TEST_DURATION_MODE == "duration" and self._is_limit_reached():
                     break
 
-                # 3.2 READ AND INTEGRITY VERIFICATION
+                # READ AND INTEGRITY VERIFICATION
 
-                self.emit_status(f"Cycle {label_cycle} - READ")
-                self.emit_phase(TestPhase.READ)
+                self.status_callback(f"Cycle {label_cycle} - READ")
+                self.phase_callback(TestPhase.READ)
 
                 try:
                     os.lseek(fd, 0, os.SEEK_SET)
@@ -297,8 +304,6 @@ class UsbPerformanceTestService:
                         reference_hash,
                         cycle,
                         writer,
-                        self._get_elapsed,
-                        self._emit_progress,
                         block_measurements,
                     )
 
@@ -311,12 +316,12 @@ class UsbPerformanceTestService:
                     set_result_error(result, exc, "Read")
 
                 finally:
-                    self.emit_phase(TestPhase.OTHER)
-
+                    self.phase_callback(TestPhase.OTHER)
 
         # USER CANCELLATION
-        # The CSV file and raw device are now closed.
-        if self.cancellation_requested():
+
+        # The CSV file and raw device are closed at this point.
+        if self.is_cancelled():
             return self._cancel_test(result)
 
         # STATISTICS AND VERDICT
@@ -330,92 +335,78 @@ class UsbPerformanceTestService:
                 cycle_write_measurements=cycle_write_measurements,
                 cycle_read_measurements=cycle_read_measurements,
                 integrity_errors=integrity_errors,
-                interrupted=self.interruption_requested(),
+                interrupted=self.is_interrupted(),
                 io_failed=io_failed,
             )
         )
 
         # INTERRUPTION AND I/O ERROR HANDLING
 
-        if self.interruption_requested() or io_failed:
+        if self.is_interrupted() or io_failed:
             result["result"] = "FAIL"
             result["completed"] = False
 
-            if self.interruption_requested():
-                result["error"] = self.abort_reason()
+            if self.is_interrupted() and not result["error"]:
+                result["error"] = self.get_abort_reason()
 
-            # Never reformat after an interruption or I/O error.
-            result["reformat"] = "NOT PERFORMED (test interrupted)"
-            result["device_info"] = info.copy()
+            result["reformat"] = "NOT PERFORMED (test interrupted or failed)"
             return result
 
         # DEVICE REFORMATTING
 
-        # Reformat even when performance thresholds were not met.
-        # A reformatting failure causes the qualification to fail.
+        # Reformat even if performance thresholds were not met.
         self._run_reformat_step(result)
 
-        # FINALIZE TEST RESULT
-
-        result["device_info"] = info.copy()
         return result
 
-   
+
+    # --------------------------------------------------------
+    # WRITE AND READ OPERATIONS
+    # --------------------------------------------------------
+
     def _write_cycle(
         self,
         fd,
         buffer,
         cycle,
         writer,
-        elapsed,
-        emit_progress,
         block_measurements,
     ):
         """
         Sequentially write blocks to the device using O_DIRECT.
 
-        For each block:
-            - Measure write duration.
-            - Compute instantaneous throughput.
-            - Store the measurement in the CSV file.
-            - Send the measurement and progress to the GUI.
-
         Return the number of bytes written and cumulative I/O time.
         """
 
-       # MEASUREMENT INITIALIZATION
         bytes_done = 0
         io_time = 0.0
 
-        # SEQUENTIAL BLOCK WRITES
+        # Sequential block writes.
         for block_number in range(NUMBER_BLOCKS):
 
-            # Stop the cycle if an interruption was requested.
-            if self.interruption_requested():
+            if self.is_interrupted():
                 break
 
-            # WRITE AND TIMING
-            t0 = time.perf_counter_ns()
+            # Measure raw write duration.
+            start_ns = time.perf_counter_ns()
             written = os.writev(fd, [buffer])
-            duration = (time.perf_counter_ns() - t0) / 1e9
+            duration = (time.perf_counter_ns() - start_ns) / 1e9
 
-            # A partial write is considered an error.
             if written != BLOCK_SIZE:
                 raise OSError(
-                    f"Partial writing at block {block_number} "
+                    f"Partial write at block {block_number} "
                     f"({written}/{BLOCK_SIZE} bytes)"
                 )
 
-            # PERFORMANCE CALCULATION
+            # Store performance measurement.
             bytes_done += written
             io_time += duration
 
             mbps = compute_mbps(written, duration)
             block_measurements.append((written, duration))
 
-            rel = elapsed()
+            elapsed = self._get_elapsed()
 
-            # STORE MEASUREMENT
             writer.writerow([
                 cycle,
                 "WRITE",
@@ -426,20 +417,15 @@ class UsbPerformanceTestService:
                 1,
             ])
 
-            self.emit_sample("WRITE", rel, mbps)
-            emit_progress("write", block_number)
+            self.sample_callback("WRITE", elapsed, mbps)
+            self._update_progress("write", block_number)
 
-            # DURATION CHECK
-            if (
-                TEST_DURATION_MODE == "duration"
-                and elapsed() >= TEST_DURATION
-            ):
+            # Stop when the configured duration has been reached.
+            if TEST_DURATION_MODE == "duration" and elapsed >= TEST_DURATION:
                 break
 
-        # FLUSH WRITES
-        # Outside performance timing.
-        # Do not unnecessarily extend an interrupted test.
-        if not self.interruption_requested():
+        # Flush writes outside performance timing.
+        if not self.is_interrupted():
             os.fsync(fd)
 
         return bytes_done, io_time
@@ -452,67 +438,51 @@ class UsbPerformanceTestService:
         reference_hash,
         cycle,
         writer,
-        elapsed,
-        emit_progress,
         block_measurements,
     ):
         """
         Sequentially read blocks and verify data integrity.
 
-        For each block:
-            - Measure read duration using O_DIRECT.
-            - Compute instantaneous throughput.
-            - Verify block size and SHA-256 hash.
-            - Store the measurement in the CSV file.
-            - Send the measurement and progress to the GUI.
-
         Return the number of bytes read, cumulative I/O time and integrity errors.
         """
 
-        # MEASUREMENT INITIALIZATION
         bytes_done = 0
         io_time = 0.0
-        errors_found = 0
+        integrity_errors = 0
 
-        # SEQUENTIAL BLOCK READS
+        # Sequential block reads.
         for block_number in range(NUMBER_BLOCKS):
 
-            # Stop the cycle if an interruption was requested.
-            if self.interruption_requested():
+            if self.is_interrupted():
                 break
 
-            # READ AND TIMING
-            t0 = time.perf_counter_ns()
-            n = os.readv(fd, [buffer])
-            duration = (time.perf_counter_ns() - t0) / 1e9
+            # Measure raw read duration.
+            start_ns = time.perf_counter_ns()
+            read_bytes = os.readv(fd, [buffer])
+            duration = (time.perf_counter_ns() - start_ns) / 1e9
 
-            # A zero-length read is considered an error.
-            if n == 0:
-                raise OSError(
-                    f"Read operation interrupted at the data block {block_number}"
-                )
+            if read_bytes == 0:
+                raise OSError(f"Empty read at block {block_number}")
 
-            # PERFORMANCE CALCULATION
-            bytes_done += n
+            # Store performance measurement.
+            bytes_done += read_bytes
             io_time += duration
 
-            mbps = compute_mbps(n, duration)
-            block_measurements.append((n, duration))
+            mbps = compute_mbps(read_bytes, duration)
+            block_measurements.append((read_bytes, duration))
 
-            # INTEGRITY VERIFICATION
-            # SHA-256 computation remains outside I/O timing.
-            received_hash = hashlib.sha256(buffer[:n]).digest()
+            # Verify block integrity outside I/O timing.
+            received_hash = hashlib.sha256(buffer[:read_bytes]).digest()
 
             integrity = int(
-                n == BLOCK_SIZE
+                read_bytes == BLOCK_SIZE
                 and received_hash == reference_hash
             )
 
             if not integrity:
-                errors_found += 1
+                integrity_errors += 1
 
-            # STORE MEASUREMENT
-            rel = elapsed()
+            elapsed = self._get_elapsed()
 
             writer.writerow([
                 cycle,
@@ -524,69 +494,33 @@ class UsbPerformanceTestService:
                 integrity,
             ])
 
-            self.emit_sample("READ", rel, mbps)
-            emit_progress("read", block_number)
+            self.sample_callback("READ", elapsed, mbps)
+            self._update_progress("read", block_number)
 
-            # DURATION CHECK
-            if (
-                TEST_DURATION_MODE == "duration"
-                and elapsed() >= TEST_DURATION
-            ):
+            # Stop when the configured duration has been reached.
+            if TEST_DURATION_MODE == "duration" and elapsed >= TEST_DURATION:
                 break
 
-        return bytes_done, io_time, errors_found
+        return bytes_done, io_time, integrity_errors
 
 
-    def _get_elapsed(self):
-        """Return elapsed time since the start of measurements, in seconds."""
-        return time.perf_counter() - self._global_start
-
-
-    def _is_limit_reached(self):
-        """Return whether the configured cycle or duration limit was reached."""
-        if TEST_DURATION_MODE == "cycles":
-            return self._cycle >= TEST_CYCLES
-        return self._get_elapsed() >= TEST_DURATION
-
-
-    def _emit_progress(self, phase, block_number):
-        """Send GUI progress limited to 95% during I/O operations."""
-
-        if TEST_DURATION_MODE == "cycles":
-            fraction = (block_number + 1) / NUMBER_BLOCKS
-
-            if phase == "write":
-                cycle_progress = 0.5 * fraction
-            else:
-                cycle_progress = 0.5 + 0.5 * fraction
-
-            progress = ((self._cycle - 1) + cycle_progress) / TEST_CYCLES
-
-        else:
-            progress = self._get_elapsed() / TEST_DURATION
-
-        pct = min(95, 5 + int(progress * 90))
-
-        if pct != self._last_pct:
-            self._last_pct = pct
-            self.emit_progress(pct)
-
+    # --------------------------------------------------------
+    # TEST FINALIZATION
+    # --------------------------------------------------------
 
     def _run_reformat_step(self, result):
         """Reformat the DUT and update the test result."""
 
-        if self.interruption_requested():
+        # Prevent reformatting if an interruption occurs at the last moment.
+        if self.is_interrupted():
             result["result"] = "FAIL"
             result["completed"] = False
-            result["error"] = self.abort_reason()
+            result["error"] = self.get_abort_reason()
             result["reformat"] = "NOT PERFORMED (test interrupted)"
             return
 
-
-        self.emit_progress(96)
-        self.emit_status(
-            f"Reformatting to {REFORMAT_FS.upper()}..."
-        )
+        self.progress_callback(96)
+        self.status_callback(f"Reformatting to {REFORMAT_FS.upper()}...")
 
         try:
             reformat_device(
@@ -602,37 +536,34 @@ class UsbPerformanceTestService:
             )
 
         except Exception as exc:
-            set_result_error(
-                result,
-                exc,
-                "Reformatting",
-            )
-            result["reformat"] = (
-                f"FAILURE : {result['error']}"
-            )
+            set_result_error(result, exc, "Reformatting")
+            result["reformat"] = f"FAILURE: {result['error']}"
 
 
     def _cancel_test(self, result):
-        """Clean current results and attempt to restore the DUT after cancellation."""
+        """Clean test files and restore the DUT after cancellation."""
 
-        self.emit_status("Cancellation: Cleaning up files...")
+        self.status_callback("Cancellation: Cleaning up files...")
 
-        # Delete only files associated with the current test.
+        # Delete files created by the cancelled test.
         for key in ("docx", "csv"):
             path = result.get(key)
 
-            if path:
-                try:
-                    Path(path).unlink(missing_ok=True)
-                except OSError as exc:
-                    self.emit_status(f"Cannot delete : {exc}")
+            if not path:
+                continue
+
+            try:
+                Path(path).unlink(missing_ok=True)
+
+            except OSError as exc:
+                self.status_callback(f"Cannot delete {path}: {exc}")
+
+        # Restore the DUT to its final formatted state.
+        self.status_callback(
+            f"Cancellation: Reformatting to {REFORMAT_FS.upper()}..."
+        )
 
         try:
-
-            self.emit_status(
-                f"Cancellation: Reformat to {REFORMAT_FS.upper()}..."
-            )
-
             reformat_device(
                 self.devnode,
                 REFORMAT_FS,
@@ -642,8 +573,9 @@ class UsbPerformanceTestService:
 
         except Exception as exc:
             result["result"] = "CANCEL_FAILED"
-            result["error"] = str(exc)
-            result["reformat"] = f"FAILURE : {exc}"
+            result["completed"] = False
+            result["error"] = format_error(exc, "Cancellation reformatting")
+            result["reformat"] = f"FAILURE: {result['error']}"
             return result
 
         result["result"] = "CANCELLED"
@@ -654,6 +586,49 @@ class UsbPerformanceTestService:
         return result
 
 
+    # --------------------------------------------------------
+    # INTERNAL HELPERS
+    # --------------------------------------------------------
+
+    def _get_elapsed(self):
+        """Return elapsed test time in seconds."""
+
+        return time.perf_counter() - self._global_start
+
+
+    def _is_limit_reached(self):
+        """Return whether the configured test limit has been reached."""
+
+        if TEST_DURATION_MODE == "cycles":
+            return self._cycle >= TEST_CYCLES
+
+        return self._get_elapsed() >= TEST_DURATION
+
+
+    def _update_progress(self, phase, block_number):
+        """Update GUI progress during performance testing."""
+
+        if TEST_DURATION_MODE == "cycles":
+            block_progress = (block_number + 1) / NUMBER_BLOCKS
+
+            if phase == "write":
+                cycle_progress = 0.5 * block_progress
+            else:
+                cycle_progress = 0.5 + 0.5 * block_progress
+
+            progress = (
+                (self._cycle - 1) + cycle_progress
+            ) / TEST_CYCLES
+
+        else:
+            progress = self._get_elapsed() / TEST_DURATION
+
+        progress_percent = min(95, 5 + int(progress * 90))
+
+        if progress_percent != self._last_pct:
+            self._last_pct = progress_percent
+            self.progress_callback(progress_percent)
+
 
 # ============================================================
 # 2. USB 2.0 FALLBACK TEST
@@ -662,22 +637,25 @@ class UsbPerformanceTestService:
 class Usb2FallbackTestService:
     """Verify USB 2.0 High-Speed fallback enumeration."""
 
-    def __init__(
-        self,
-        emit_status,
-        interruption_requested,
-    ):
-        self.emit_status = emit_status
-        self.interruption_requested = interruption_requested
+    # --------------------------------------------------------
+    # INITIALIZATION
+    # --------------------------------------------------------
 
+    def __init__(self, status_callback, is_interrupted):
+        self.status_callback = status_callback
+        self.is_interrupted = is_interrupted
+
+
+    # --------------------------------------------------------
+    # TEST EXECUTION
+    # --------------------------------------------------------
 
     def run(self):
-        """Execute the USB 2.0 fallback test and restore USB 3."""
+        """Test USB2 fallback and restore normal USB operation."""
 
         result = {
             "result": "FAIL",
             "speed_mbps": None,
-            "devnode": "",
             "error": "",
         }
 
@@ -685,22 +663,16 @@ class Usb2FallbackTestService:
         connected = False
 
         try:
-            # ------------------------------------------------
-            # Connect to Acroname
-            # ------------------------------------------------
-
-            self.emit_status(
+            # Connect to the Acroname module.
+            self.status_callback(
                 "USB 2.0 fallback - connecting to Acroname..."
             )
 
             adapter.connect()
             connected = True
 
-            # ------------------------------------------------
-            # Power-cycle DUT
-            # ------------------------------------------------
-
-            self.emit_status(
+            # Disconnect the DUT.
+            self.status_callback(
                 "USB 2.0 fallback - disconnecting DUT..."
             )
 
@@ -713,43 +685,31 @@ class Usb2FallbackTestService:
 
             time.sleep(0.3)
 
-            # ------------------------------------------------
-            # Reconnect with USB2 only
-            # ------------------------------------------------
-
-            self.emit_status(
+            # Reconnect the DUT with USB2 only.
+            self.status_callback(
                 "USB 2.0 fallback - reconnecting at High-Speed..."
             )
 
             adapter.enable_usb2_only()
 
-            devnode, speed = wait_for_test_device(
+            _, speed_mbps = wait_for_test_device(
                 timeout_s=USB2_ENUM_TIMEOUT_S,
                 poll_interval_s=USB2_POLL_INTERVAL_S,
                 expected_speed_mbps=480.0,
-                interruption_requested=self.interruption_requested,
+                is_interrupted=self.is_interrupted,
             )
 
             result["result"] = "PASS"
-            result["speed_mbps"] = speed
-            result["devnode"] = devnode
+            result["speed_mbps"] = speed_mbps
 
         except Exception as exc:
-
-            result["result"] = "FAIL"
-            result["error"] = str(exc)
+            result["error"] = format_error(exc, "USB 2.0 fallback")
 
         finally:
-
-            # ------------------------------------------------
-            # Restore normal USB3 operation
-            # ------------------------------------------------
-
+            # Restore normal USB operation before releasing the Acroname.
             if connected:
                 try:
-                    self.emit_status(
-                        "Restoring normal USB operation..."
-                    )
+                    self.status_callback("Restoring normal USB operation...")
 
                     adapter.power_off_dut()
 
@@ -768,15 +728,10 @@ class Usb2FallbackTestService:
                     )
 
                 except Exception as exc:
-
-                    restore_error = (
-                        f"USB restore failed: {exc}"
-                    )
+                    restore_error = format_error(exc, "USB restore")
 
                     if result["error"]:
-                        result["error"] += (
-                            f" | {restore_error}"
-                        )
+                        result["error"] += f" | {restore_error}"
                     else:
                         result["error"] = restore_error
 
@@ -785,4 +740,4 @@ class Usb2FallbackTestService:
                 finally:
                     adapter.disconnect()
 
-        return result
+        return result   

@@ -39,10 +39,29 @@ from config import (
 
 
 # ============================================================
-# MODULE CONSTANTS
+# MODULE CONSTANTS AND DOMAIN VALUES
 # ============================================================
 
 BLKGETDISKSEQ = 0x80081280
+
+
+class TestPhase(str, Enum):
+    """Represent VBUS measurement phases."""
+
+    IDLE = "IDLE"
+    WRITE = "WRITE"
+    READ = "READ"
+    OTHER = "OTHER"
+
+
+@dataclass
+class VbusSample:
+    """Store one VBUS measurement."""
+
+    timestamp_ns: int
+    voltage_v: float
+    current_ma: float
+    phase: TestPhase = TestPhase.OTHER
 
 
 # ============================================================
@@ -65,6 +84,23 @@ def run_command(cmd, timeout=20, input_text=None):
 
     except (OSError, subprocess.TimeoutExpired) as exc:
         return "", str(exc), -1
+
+
+def run_checked_command(cmd, timeout=30, input_text=None):
+    """Run a command and raise an exception if it fails."""
+
+    out, err, rc = run_command(
+        cmd,
+        timeout=timeout,
+        input_text=input_text,
+    )
+
+    if rc != 0:
+        raise RuntimeError(
+            f"Command failed: {' '.join(cmd)}\n{err or out}"
+        )
+
+    return out
 
 
 def get_root_disk():
@@ -162,7 +198,7 @@ def wait_for_test_device(
     timeout_s,
     poll_interval_s=0.1,
     expected_speed_mbps=None,
-    interruption_requested=None,
+    is_interrupted=None,
 ):
     """Wait for one USB disk to enumerate on the test port."""
 
@@ -172,7 +208,7 @@ def wait_for_test_device(
     while time.monotonic() < deadline:
 
         # Abort enumeration if the qualification is interrupted.
-        if interruption_requested is not None and interruption_requested():
+        if is_interrupted is not None and is_interrupted():
             raise RuntimeError("USB enumeration interrupted")
 
         candidates = scan_usb_candidates()
@@ -439,23 +475,6 @@ FILESYSTEM_CONFIG = {
 }
 
 
-def run_checked_command(cmd, timeout=30, input_text=None):
-    """Run a command and raise an exception if it fails."""
-
-    out, err, rc = run_command(
-        cmd,
-        timeout=timeout,
-        input_text=input_text,
-    )
-
-    if rc != 0:
-        raise RuntimeError(
-            f"Command failed: {' '.join(cmd)}\n{err or out}"
-        )
-
-    return out
-
-
 def get_mounted_partitions(devnode):
     """Return mounted filesystems belonging to the DUT."""
 
@@ -580,28 +599,6 @@ def reformat_device(devnode, fs_type, label, expected_diskseq):
             f"{fs_type.upper()} not detected after reformatting "
             f"(blkid: {detected_fs or 'unknown'}, expected: {config['blkid']})"
         )
-
-# ============================================================
-# DOMAIN VALUES
-# ============================================================
-
-class TestPhase(str, Enum):
-    """Represent VBUS measurement phases."""
-
-    IDLE = "IDLE"
-    WRITE = "WRITE"
-    READ = "READ"
-    OTHER = "OTHER"
-
-
-@dataclass
-class VbusSample:
-    """Store one VBUS measurement."""
-
-    timestamp_ns: int
-    voltage_v: float
-    current_ma: float
-    phase: TestPhase = TestPhase.OTHER
 
 
 # ============================================================
@@ -849,10 +846,6 @@ def set_result_error(result, exc, operation=""):
     result["completed"] = False
 
 
-# ============================================================
-# 8. PASS/FAIL EVALUATION
-# ============================================================
-
 def evaluate_performance_test(
     total_written,
     total_read,
@@ -897,7 +890,7 @@ def evaluate_performance_test(
 
 
 # ============================================================
-# 8. REPORT GENERATION
+# 8. OUTPUT PATHS
 # ============================================================
 
 def sanitize_filename(text):
@@ -920,6 +913,10 @@ def create_result_paths(serial):
         "docx": str(RESULTS_DIR / f"USB_report_{tag}.docx"),
     }
 
+
+# ============================================================
+# 9. REPORT GENERATION
+# ============================================================
 
 def build_device_info_text(info):
     """Format DUT information for display and reporting."""
@@ -1289,7 +1286,7 @@ def write_docx_report(
 
 
 # ============================================================
-# 9. TEST-LINK WEAR COUNTERS
+# 10. TEST-LINK WEAR COUNTERS
 # ============================================================
 
 def load_test_link_counters():
