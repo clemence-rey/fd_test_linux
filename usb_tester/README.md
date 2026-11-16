@@ -24,7 +24,7 @@ The GUI is implemented with **PyQt5**.
 
 ## Test sequence
 
-1. The operator enters the **OF number** and selects the **SAP / test link**.
+1. The operator enters the **WO number** and selects the **SAP / test link**.
 2. The application waits for a DUT on the dedicated USB test port.
 3. The DUT identity is recorded using Linux `DISKSEQ`.
 4. The selected test-link mating counter is incremented.
@@ -174,7 +174,7 @@ USB_report_YYYYMMDD_HHMMSS_SERIAL.pdf
 The report includes:
 
 - DUT identification
-- OF and SAP
+- WO and SAP
 - test-link reference and mating cycles
 - performance statistics
 - integrity result

@@ -526,7 +526,7 @@ class AppController(QObject):
                 output_path=path,
                 report_text=result.get("report", ""),
                 figure=self.view.get_report_figure(),
-                of_number=self.test_config["of"],
+                wo_number=self.test_config["of"],
                 sap=self.test_config["sap"],
                 device=result.get("device_info", {}).get("Model", "N/A"),
                 serial=result.get("device_info", {}).get("Serial", "N/A"),

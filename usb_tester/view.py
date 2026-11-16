@@ -91,8 +91,8 @@ class TestSetupDialog(QDialog):
 
         # Widgets
 
-        self.of_input = QLineEdit()
-        self.of_input.setPlaceholderText("Enter OF number")
+        self.wo_input = QLineEdit()
+        self.wo_input.setPlaceholderText("Enter WO number")
 
         self.sap_combo = QComboBox()
         self.sap_combo.addItems(TEST_LINK_REFS.keys())
@@ -111,7 +111,7 @@ class TestSetupDialog(QDialog):
 
         form = QFormLayout()
 
-        form.addRow("OF Number:", self.of_input)
+        form.addRow("WO Number:", self.wo_input)
         form.addRow("SAP Number:", self.sap_combo)
         form.addRow("Test Link:", self.test_link_label)
 
@@ -136,7 +136,7 @@ class TestSetupDialog(QDialog):
             self._update_test_link_label
         )
 
-        self.of_input.textChanged.connect(
+        self.wo_input.textChanged.connect(
             self._update_start_button_state
         )
 
@@ -161,13 +161,12 @@ class TestSetupDialog(QDialog):
 
 
     def _update_start_button_state(self):
-        """Enable session start only when an OF number is provided."""
+        """Enable session start only when the OF number contains exactly 7 digits."""
 
-        valid = bool(self.of_input.text().strip())
+        wo_number = self.wo_input.text().strip()
+        valid = len(wo_number) == 7 and wo_number.isascii() and wo_number.isdigit()
 
-        self.buttons.button(
-            QDialogButtonBox.Ok
-        ).setEnabled(valid)
+        self.buttons.button(QDialogButtonBox.Ok).setEnabled(valid)
 
 
     # --------------------------------------------------------
@@ -180,7 +179,7 @@ class TestSetupDialog(QDialog):
         sap = self.sap_combo.currentText()
 
         return {
-            "of": self.of_input.text().strip(),
+            "of": self.wo_input.text().strip(),
             "sap": sap,
             "test_link": TEST_LINK_REFS[sap],
         }

@@ -1175,7 +1175,7 @@ def write_docx_report(
     report_text,
     figure,
     *,
-    of_number=None,
+    wo_number=None,
     sap=None,
     device=None,
     serial=None,
@@ -1197,7 +1197,7 @@ def write_docx_report(
     doc = Document(str(template_path))
 
     values = {
-        "{{OF}}": of_number or "Not assigned",
+        "{{WO}}": wo_number or "Not assigned",
         "{{SAP}}": sap or "Not assigned",
         "{{DEV_NAME}}": device or "N/A",
         "{{SERIAL}}": serial or "N/A",
