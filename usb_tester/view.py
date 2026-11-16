@@ -179,7 +179,7 @@ class TestSetupDialog(QDialog):
         sap = self.sap_combo.currentText()
 
         return {
-            "of": self.wo_input.text().strip(),
+            "wo": self.wo_input.text().strip(),
             "sap": sap,
             "test_link": TEST_LINK_REFS[sap],
         }
@@ -212,8 +212,8 @@ class MainWindow(QMainWindow):
         # Current displayed information.
         self.current_info = ""
 
-        self.show_test_link_header = True
-        self.test_link_header = ""
+        self.show_session_header = True
+        self.session_header = ""
         self._close_allowed = False
 
         # Initialize the interface.
@@ -357,11 +357,8 @@ class MainWindow(QMainWindow):
     def _update_information_panel(self):
         """Render the current information panel."""
 
-        if self.show_test_link_header:
-            text = (
-                f"{self.test_link_header}\n\n"
-                f"{self.current_info}"
-            )
+        if self.show_session_header:
+            text = f"{self.session_header}\n\n{self.current_info}"
         else:
             text = self.current_info
 
@@ -530,27 +527,25 @@ class MainWindow(QMainWindow):
         self.vbus_label.setText(f"VBUS unavailable: {message}")
 
 
-    def set_test_link_info(self, reference, cycles, max_cycles):
-        """Set the test-link information header."""
+    def set_session_info(self, wo, sap, reference, cycles, max_cycles):
+        """Set the session information header."""
 
-        self.test_link_header = (
-            "=== TEST-LINK ===\n"
-            f"Reference : {reference}\n"
+        self.session_header = (
+            "=== SESSION ===\n"
+            f"WO number : {wo}\n"
+            f"DUT SAP reference : {sap}\n"
+            f"Test-link reference : {reference}\n"
             f"Mating cycle : {cycles} / {max_cycles}"
         )
 
         self._update_information_panel()
 
 
-    def set_result_text(
-        self,
-        text,
-        show_test_link_header=True,
-    ):
+    def set_result_text(self, text, show_session_header=True):
         """Set the currently displayed information text."""
 
         self.current_info = text
-        self.show_test_link_header = show_test_link_header
+        self.show_session_header = show_session_header
         self._update_information_panel()
 
 
@@ -629,7 +624,7 @@ class MainWindow(QMainWindow):
         passed = result["result"] == "PASS"
 
         self.progress.setValue(100)
-        self.set_result_text(result.get("report", ""), show_test_link_header=False)
+        self.set_result_text(result.get("report", ""), show_session_header=False)
 
         self._set_banner(
             TXT_PASS if passed else TXT_FAIL,

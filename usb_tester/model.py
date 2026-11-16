@@ -992,8 +992,10 @@ def build_report(result):
     usb2 = result.get("usb2_test", {})
 
     lines = [
-        "=== TEST-LINK ===",
-        f"{'Reference':<20}: {test_link.get('reference', 'N/A')}",
+        "=== SESSION ===",
+        f"{'WO number':<20}: {result.get('wo', 'N/A')}",
+        f"{'DUT SAP reference':<20}: {result.get('sap', 'N/A')}",
+        f"{'Test-link reference':<20}: {test_link.get('reference', 'N/A')}",
         f"{'Mating cycle':<20}: "
         f"{test_link.get('cycles', 'N/A')} / "
         f"{test_link.get('max_cycles', 'N/A')}",

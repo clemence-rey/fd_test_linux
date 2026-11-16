@@ -117,7 +117,7 @@ class AppController(QObject):
 
         # Initialize the View.
         self.view.show_waiting_insert()
-        self._refresh_test_link_display()
+        self._refresh_session_display()
 
         # Restore the Acroname DUT port to normal USB operation.
         self._initialize_acroname()
@@ -162,12 +162,14 @@ class AppController(QObject):
         }
 
 
-    def _refresh_test_link_display(self):
-        """Update the View with the selected test-link information."""
+    def _refresh_session_display(self):
+        """Update the View with the session information."""
 
         test_link = self._get_test_link_info()
 
-        self.view.set_test_link_info(
+        self.view.set_session_info(
+            wo=self.test_config["wo"],
+            sap=self.test_config["sap"],
             reference=test_link["reference"],
             cycles=test_link["cycles"],
             max_cycles=test_link["max_cycles"],
@@ -214,7 +216,7 @@ class AppController(QObject):
             if (is_new_device and self.state != AppState.USB2_TESTING):
                 try:
                     increment_test_link_counter(self.test_config["test_link"])
-                    self._refresh_test_link_display()
+                    self._refresh_session_display()
 
                 except (OSError, ValueError, TypeError) as exc:
                     self.view.set_step_status(f"Counter error: {exc}")
@@ -500,6 +502,8 @@ class AppController(QObject):
         result["vbus_stats"] = compute_vbus_phase_stats(self.vbus_samples)
         result["vbus_error"] = self.vbus_error
         result["test_link"] = self._get_test_link_info()
+        result["sap"] = self.test_config["sap"]
+        result["wo"] = self.test_config["wo"]
 
         # Build the final report content and graph.
         result["report"] = build_report(result)
@@ -526,7 +530,7 @@ class AppController(QObject):
                 output_path=path,
                 report_text=result.get("report", ""),
                 figure=self.view.get_report_figure(),
-                wo_number=self.test_config["of"],
+                wo_number=self.test_config["wo"],
                 sap=self.test_config["sap"],
                 device=result.get("device_info", {}).get("Model", "N/A"),
                 serial=result.get("device_info", {}).get("Serial", "N/A"),
