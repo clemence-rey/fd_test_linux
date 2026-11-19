@@ -19,10 +19,6 @@ from config import (
     SOFTWARE_VERSION,
     STATION_NAME,
     TEMPLATE_PATH,
-    TEST_CYCLES,
-    TEST_DURATION,
-    TEST_LIMIT_MODE,
-    TEST_FILE_SIZE_MB,
     VBUS_SAMPLE_INTERVAL_S,
 )
 
@@ -43,6 +39,7 @@ from model import (
     write_docx_report,
 )
 from test_service import Usb2FallbackTestService, UsbPerformanceTestService
+from test_profiles import TEST_PROFILES
 
 
 # ============================================================
@@ -78,6 +75,7 @@ class AppController(QObject):
         # Store the View and the current test configuration.
         self.view = view
         self.test_config = test_config
+        self.test_profile = TEST_PROFILES[test_config["sap"]].copy()
 
         # Initialize the application state.
         self.state = AppState.WAITING_INSERT
@@ -376,6 +374,7 @@ class AppController(QObject):
         self.qualification_worker = UsbQualificationWorker(
             self.current_devnode,
             self.current_diskseq,
+            self.test_profile,
         )
 
         self.qualification_worker.status.connect(self.view.set_step_status)
@@ -506,7 +505,7 @@ class AppController(QObject):
         result["wo"] = self.test_config["wo"]
 
         # Build the final report content and graph.
-        result["report"] = build_report(result)
+        result["report"] = build_report(result, self.test_profile)
 
         self.view.update_final_graph(result)
 
@@ -534,12 +533,12 @@ class AppController(QObject):
                 sap=self.test_config["sap"],
                 device=result.get("device_info", {}).get("Model", "N/A"),
                 serial=result.get("device_info", {}).get("Serial", "N/A"),
-                file_size=f"{TEST_FILE_SIZE_MB} MB",
+                file_size=f"{self.test_profile['test_file_size_mb']} MB",
                 block_size=f"{BLOCK_SIZE_MB} MB",
                 test_duration=(
-                    f"{TEST_CYCLES} cycles"
-                    if TEST_LIMIT_MODE == "cycles"
-                    else f"{TEST_DURATION:g} s"
+                    f"{self.test_profile['test_cycles']} cycles"
+                    if self.test_profile["test_limit_mode"] == "cycles"
+                    else f"{self.test_profile['test_duration']:g} s"
                 ),
                 final_fs=REFORMAT_FS.upper(),
                 station=STATION_NAME,
@@ -813,11 +812,12 @@ class UsbQualificationWorker(QThread):
     # INITIALIZATION
     # --------------------------------------------------------
 
-    def __init__(self, devnode, expected_diskseq):
+    def __init__(self, devnode, expected_diskseq, test_profile):
         super().__init__()
 
         self.devnode = devnode
         self.expected_diskseq = expected_diskseq
+        self.test_profile = test_profile
 
         self.cancel_requested = False
         self.abort_reason = "Test interrupted"
@@ -835,6 +835,7 @@ class UsbQualificationWorker(QThread):
         performance_service = UsbPerformanceTestService(
             devnode=self.devnode,
             expected_diskseq=self.expected_diskseq,
+            test_profile=self.test_profile,
             status_callback=self.status.emit,
             device_info_callback=self.info_ready.emit,
             sample_callback=self.sample.emit,
@@ -848,8 +849,12 @@ class UsbQualificationWorker(QThread):
         result = performance_service.run()
 
         # Continue with USB2 if the first stage completed normally.
+        if not self.test_profile["usb2_enabled"]:
+            result["usb2_test"]["result"] = "NOT REQUIRED"
+
         run_usb2 = (
-            result["result"] not in ("CANCELLED", "CANCEL_FAILED")
+            self.test_profile["usb2_enabled"]
+            and result["result"] not in ("CANCELLED", "CANCEL_FAILED")
             and result.get("completed", False)
             and not self.isInterruptionRequested()
         )

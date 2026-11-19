@@ -24,13 +24,8 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 # Application configuration
-from config import (
-    BLOCK_SIZE_MB,
-    MIN_READ_MBPS,
-    MIN_WRITE_MBPS,
-    TEST_FILE_SIZE_MB,
-    TEST_LINK_REFS,
-)
+from config import BLOCK_SIZE_MB
+from test_profiles import TEST_PROFILES
 
 
 # ============================================================
@@ -95,7 +90,7 @@ class TestSetupDialog(QDialog):
         self.wo_input.setPlaceholderText("Enter WO number")
 
         self.sap_combo = QComboBox()
-        self.sap_combo.addItems(TEST_LINK_REFS.keys())
+        self.sap_combo.addItems(TEST_PROFILES.keys())
 
         self.test_link_label = QLabel()
 
@@ -154,10 +149,7 @@ class TestSetupDialog(QDialog):
         """Display the test link associated with the selected SAP."""
 
         sap = self.sap_combo.currentText()
-
-        self.test_link_label.setText(
-            TEST_LINK_REFS.get(sap, "N/A")
-        )
+        self.test_link_label.setText(TEST_PROFILES[sap]["test_link"])
 
 
     def _update_start_button_state(self):
@@ -181,7 +173,7 @@ class TestSetupDialog(QDialog):
         return {
             "wo": self.wo_input.text().strip(),
             "sap": sap,
-            "test_link": TEST_LINK_REFS[sap],
+            "test_link": TEST_PROFILES[sap]["test_link"],
         }
 
 
@@ -201,7 +193,7 @@ class MainWindow(QMainWindow):
     # INITIALIZATION
     # --------------------------------------------------------
 
-    def __init__(self):
+    def __init__(self, test_profile):
         """Initialize the main test window."""
 
         super().__init__()
@@ -215,6 +207,7 @@ class MainWindow(QMainWindow):
         self.show_session_header = True
         self.session_header = ""
         self._close_allowed = False
+        self.test_profile = test_profile
 
         # Initialize the interface.
         self.graph_dirty = False
@@ -385,7 +378,7 @@ class MainWindow(QMainWindow):
         self.ax.set_xlabel("Test Time [min]")
         self.ax.set_ylabel("Speed [MB/s]")
         self.ax.set_title(
-            f"USB Read / Write Speed ({TEST_FILE_SIZE_MB} MB test, "
+            f"USB Read / Write Speed ({self.test_profile['test_file_size_mb']} MB test, "
             f"{BLOCK_SIZE_MB} MB blocks)"
         )
         self.ax.grid(True, alpha=0.3)
@@ -398,21 +391,21 @@ class MainWindow(QMainWindow):
             )
         # PASS / FAIL thresholds
         self.ax.axhline(
-            MIN_WRITE_MBPS,
+            self.test_profile["min_write_mbps"],
             linestyle="-.",
             linewidth=1.5,
             color="gray",
-            label=f"Min Write: {MIN_WRITE_MBPS:g} MB/s",
+            label=f"Min Write: {self.test_profile['min_write_mbps']:g} MB/s",
         )
         self.ax.axhline(
-            MIN_READ_MBPS,
+            self.test_profile["min_read_mbps"],
             linestyle=":",
             linewidth=1.5,
             color="gray",
-            label=f"Min Read: {MIN_READ_MBPS:g} MB/s",
+            label=f"Min Read: {self.test_profile['min_read_mbps']:g} MB/s",
         )
         self.ax.legend(loc="lower left")
-        self.figure.tight_layout()
+        self.figure.subplots_adjust(left=0.12, right=0.95, top=0.88, bottom=0.15)
         self.canvas.draw_idle()
 
 

@@ -856,6 +856,7 @@ def evaluate_performance_test(
     integrity_errors,
     interrupted,
     io_failed,
+    test_profile,
 ):
     """Compute performance statistics and evaluate the test result."""
 
@@ -872,8 +873,8 @@ def evaluate_performance_test(
     passed = (
         completed
         and integrity_errors == 0
-        and avg_write > MIN_WRITE_MBPS
-        and MIN_READ_MBPS < avg_read < MAX_READ_MBPS
+        and avg_write > test_profile["min_write_mbps"]
+        and test_profile["min_read_mbps"] < avg_read < test_profile["max_read_mbps"]
     )
 
     return {
@@ -940,7 +941,7 @@ def build_device_info_text(info):
     return "\n".join(lines)
 
 
-def get_failure_reasons(result):
+def get_failure_reasons(result, test_profile):
     """Return the qualification failure reasons."""
 
     reasons = []
@@ -953,13 +954,13 @@ def get_failure_reasons(result):
             f"{result['integrity_errors']} integrity error(s)"
         )
 
-    if 0 < result["avg_write"] <= MIN_WRITE_MBPS:
+    if 0 < result["avg_write"] <= test_profile["min_write_mbps"]:
         reasons.append("Write speed below minimum threshold")
 
-    if 0 < result["avg_read"] <= MIN_READ_MBPS:
+    if 0 < result["avg_read"] <= test_profile["min_read_mbps"]:
         reasons.append("Read speed below minimum threshold")
 
-    elif result["avg_read"] >= MAX_READ_MBPS:
+    elif result["avg_read"] >= test_profile["max_read_mbps"]:
         reasons.append("Read speed above maximum threshold")
 
     usb2 = result.get("usb2_test", {})
@@ -983,7 +984,7 @@ def get_failure_reasons(result):
     return reasons
 
 
-def build_report(result):
+def build_report(result, test_profile):
     """Build the complete USB qualification report."""
 
     info = result.get("device_info", {})
@@ -1128,7 +1129,7 @@ def build_report(result):
     if result["result"] != "PASS":
         lines.extend(
             f"- {reason}"
-            for reason in get_failure_reasons(result)
+            for reason in get_failure_reasons(result, test_profile)
         )
 
     lines.extend([

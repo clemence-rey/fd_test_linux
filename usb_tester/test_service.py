@@ -11,14 +11,9 @@ from pathlib import Path
 # Application configuration
 from config import (
     BLOCK_SIZE,
-    FILE_SIZE,
-    NUMBER_BLOCKS,
     REFORMAT_FS,
     REFORMAT_LABEL,
     RESULTS_DIR,
-    TEST_CYCLES,
-    TEST_DURATION,
-    TEST_LIMIT_MODE,
     USB2_DISCONNECT_TIMEOUT_S,
     USB2_ENUM_TIMEOUT_S,
     USB2_POLL_INTERVAL_S,
@@ -63,6 +58,7 @@ class UsbPerformanceTestService:
         self,
         devnode,
         expected_diskseq,
+        test_profile,
         status_callback,
         device_info_callback,
         sample_callback,
@@ -76,6 +72,13 @@ class UsbPerformanceTestService:
 
         self.devnode = devnode
         self.expected_diskseq = expected_diskseq
+        self.test_profile = test_profile
+
+        self.test_limit_mode = test_profile["test_limit_mode"]
+        self.test_cycles = test_profile.get("test_cycles", 1)
+        self.test_duration = test_profile.get("test_duration", 30.0)
+        self.file_size = test_profile["test_file_size_mb"] * 1024 * 1024
+        self.number_blocks = self.file_size // BLOCK_SIZE
 
         self.status_callback = status_callback
         self.device_info_callback = device_info_callback
@@ -162,7 +165,7 @@ class UsbPerformanceTestService:
         if device_size is None:
             raise RuntimeError("Device capacity unavailable")
 
-        if device_size < FILE_SIZE * 1.1:
+        if device_size < self.file_size * 1.1:
             raise RuntimeError("The device's storage is too small for this test")
 
         # TEST DATA AND MEASUREMENT PREPARATION
@@ -251,8 +254,8 @@ class UsbPerformanceTestService:
                     self.sample_callback("SEP", float("nan"), float("nan"))
 
                 label_cycle = (
-                    f"{cycle}/{TEST_CYCLES}"
-                    if TEST_LIMIT_MODE == "cycles"
+                    f"{cycle}/{self.test_cycles}"
+                    if self.test_limit_mode == "cycles"
                     else str(cycle)
                 )
 
@@ -290,7 +293,7 @@ class UsbPerformanceTestService:
                     break
 
                 # Do not start reading if duration mode already reached its limit.
-                if TEST_LIMIT_MODE == "duration" and self._is_limit_reached():
+                if self.test_limit_mode == "duration" and self._is_limit_reached():
                     break
 
                 # READ AND INTEGRITY VERIFICATION
@@ -345,6 +348,7 @@ class UsbPerformanceTestService:
                 integrity_errors=integrity_errors,
                 interrupted=self.is_interrupted(),
                 io_failed=io_failed,
+                test_profile=self.test_profile,
             )
         )
 
@@ -396,7 +400,7 @@ class UsbPerformanceTestService:
         io_time = 0.0
 
         # Sequential block writes.
-        for block_number in range(NUMBER_BLOCKS):
+        for block_number in range(self.number_blocks):
 
             if self.is_interrupted() or self.is_cancelled():
                 break
@@ -435,7 +439,7 @@ class UsbPerformanceTestService:
             self._report_performance_progress("write", block_number)
 
             # Stop when the configured duration has been reached.
-            if TEST_LIMIT_MODE == "duration" and elapsed >= TEST_DURATION:
+            if self.test_limit_mode == "duration" and elapsed >= self.test_duration:
                 break
 
         # Flush writes outside performance timing.
@@ -465,7 +469,7 @@ class UsbPerformanceTestService:
         integrity_errors = 0
 
         # Sequential block reads.
-        for block_number in range(NUMBER_BLOCKS):
+        for block_number in range(self.number_blocks):
 
             if self.is_interrupted() or self.is_cancelled():
                 break
@@ -512,7 +516,7 @@ class UsbPerformanceTestService:
             self._report_performance_progress("read", block_number)
 
             # Stop when the configured duration has been reached.
-            if TEST_LIMIT_MODE == "duration" and elapsed >= TEST_DURATION:
+            if 	self.test_limit_mode == "duration" and elapsed >= self.test_duration:
                 break
 
         return bytes_done, io_time, integrity_errors
@@ -611,33 +615,29 @@ class UsbPerformanceTestService:
     def _is_limit_reached(self):
         """Return whether the configured test limit has been reached."""
 
-        if TEST_LIMIT_MODE == "cycles":
-            return self._cycle >= TEST_CYCLES
+        if self.test_limit_mode == "cycles":
+            return self._cycle >= self.test_cycles
 
-        return self._get_elapsed() >= TEST_DURATION
+        return self._get_elapsed() >= self.test_duration
 
 
     def _report_performance_progress(self, phase, block_number):
         """Report normalized performance-test progress."""
 
-        if TEST_LIMIT_MODE == "cycles":
-            block_progress = (block_number + 1) / NUMBER_BLOCKS
+        if self.test_limit_mode == "cycles":
+            block_progress = (block_number + 1) / self.number_blocks
 
             if phase == "write":
                 cycle_progress = 0.5 * block_progress
             else:
                 cycle_progress = 0.5 + 0.5 * block_progress
 
-            progress = (
-                (self._cycle - 1) + cycle_progress
-            ) / TEST_CYCLES
+            progress = ((self._cycle - 1) + cycle_progress) / self.test_cycles
 
         else:
-            progress = self._get_elapsed() / TEST_DURATION
+            progress = self._get_elapsed() / self.test_duration
 
-        self.performance_progress_callback(
-            min(1.0, max(0.0, progress))
-        )
+        self.performance_progress_callback(min(1.0, max(0.0, progress)))
 
 
 # ============================================================

@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import QApplication, QDialog
 # Application modules
 from controller import AppController
 from view import MainWindow, TestSetupDialog
+from test_profiles import TEST_PROFILES
 
 # ============================================================
 # 1. PRIVILEGE MANAGEMENT
@@ -34,6 +35,8 @@ def ensure_root():
         for key in ("DISPLAY", "XAUTHORITY")
         if os.environ.get(key)
     ]
+
+    env_vars.append("XDG_RUNTIME_DIR=/tmp/runtime-root")
 
     os.execvp("pkexec", [
         "pkexec", "env",
@@ -66,9 +69,10 @@ def main():
         sys.exit(0)
 
     test_config = setup.get_configuration()
+    test_profile = TEST_PROFILES[test_config["sap"]].copy()
 
     # Create and display the main window.
-    view = MainWindow()
+    view = MainWindow(test_profile)
 
     controller = AppController(
         view=view,
